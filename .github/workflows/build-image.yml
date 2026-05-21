@@ -70,15 +70,18 @@ jobs:
           # an internal `dependencies_check` that exits non-zero with a hint
           # naming the specific package — keep this list complete.
           sudo apt-get update -qq
+          # Pi-gen requires qemu-user-binfmt specifically (its dependency_check
+          # rejects qemu-user-static even though both packages provide qemu).
+          # The two conflict, so install only qemu-user-binfmt here.
           sudo apt-get install -y --no-install-recommends \
             quilt parted \
-            qemu-user-static binfmt-support \
+            qemu-user-binfmt binfmt-support \
             debootstrap zerofree zip dosfstools libarchive-tools \
             libcap2-bin grep rsync xz-utils file git curl bc \
             qemu-utils kpartx gpg pigz arch-test \
             coreutils psmisc
-          # Activate qemu-aarch64 in binfmt_misc so chroot can run arm64 bins.
-          sudo update-binfmts --enable qemu-aarch64 || true
+          # Confirm aarch64 binfmt is registered (qemu-user-binfmt registers
+          # automatically via dpkg trigger; this is just a visibility step).
           sudo update-binfmts --display qemu-aarch64 | head -5 || true
 
       - name: Clone pi-gen at pinned commit
@@ -88,15 +91,45 @@ jobs:
           git checkout "${{ env.PI_GEN_REF }}"
           echo "pi-gen HEAD: $(git rev-parse HEAD)"
 
-      - name: Apply our pi-gen config
+      - name: Apply our pi-gen config + sync custom stage
         run: |
           # Drop our config in as `config` at the pi-gen root.
           cp image/pi-gen-config pi-gen/config
           # Override IMG_NAME with the resolved tag so the output filename
           # includes the version.
           echo "IMG_NAME=${{ steps.vars.outputs.image_name }}" >> pi-gen/config
+
+          # Copy our custom stage into pi-gen's tree. Pi-gen iterates stages
+          # by directory at the project root, so this is where they need to
+          # live during the build.
+          cp -a image/stage-artnet-htp pi-gen/
+
+          # Sync our source tree into the stage's files/ dir so 00-run.sh
+          # can rsync it into the chroot. Exclude the venv, git, image
+          # build files, and the workflow files themselves.
+          install -d pi-gen/stage-artnet-htp/files
+          rsync -a --delete \
+            --exclude='.venv' --exclude='__pycache__' --exclude='.pytest_cache' \
+            --exclude='*.pyc' --exclude='.git' --exclude='image' \
+            --exclude='.github' --exclude='pi-gen' \
+            ./ pi-gen/stage-artnet-htp/files/artnet-htp-src/
+
+          # Bake a build-info.json into the stage so 00-run.sh can copy it to
+          # /etc/artnet-htp/. Surfaced at runtime by /api/version.
+          cat > pi-gen/stage-artnet-htp/files/build-info.json <<EOF
+          {
+            "version": "${{ steps.vars.outputs.tag }}",
+            "git_sha": "${{ github.sha }}",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "image": "${{ steps.vars.outputs.image_name }}"
+          }
+          EOF
+
           echo "===== final pi-gen config ====="
           cat pi-gen/config
+          echo "===== stage-artnet-htp ====="
+          ls -la pi-gen/stage-artnet-htp/
+          ls -la pi-gen/stage-artnet-htp/files/ | head
           echo "==============================="
 
       - name: Build image (this is the slow part — 25-40min)
