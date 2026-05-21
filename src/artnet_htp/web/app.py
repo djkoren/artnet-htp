@@ -304,13 +304,38 @@ def create_app(controller) -> FastAPI:
 
     # ---- REST: universe CRUD ----
     @app.post("/api/universes")
-    async def add_universe(body: UniverseBody) -> JSONResponse:
+    async def add_universes(body: UniverseBody) -> JSONResponse:
+        # Normalize single vs list. Reject if neither given.
+        requested: list[int] = []
+        if body.port_addresses is not None:
+            requested.extend(body.port_addresses)
+        if body.port_address is not None:
+            requested.append(body.port_address)
+        if not requested:
+            raise HTTPException(400, "supply `port_address` or `port_addresses`")
+        if len(requested) > 4096:
+            raise HTTPException(400, "too many universes in one request (max 4096)")
+
         cfg = controller.current_config().model_copy(deep=True)
-        if body.port_address in cfg.universes:
-            raise HTTPException(409, f"universe {body.port_address} already exists")
-        cfg.universes = sorted(cfg.universes + [body.port_address])
-        controller.apply_config(cfg)
-        return JSONResponse({"ok": True})
+        existing = set(cfg.universes)
+        added: list[int] = []
+        skipped: list[int] = []
+        # Preserve input order in `added` (skipped tracks dupes) but dedupe
+        # within the request too.
+        seen_in_request: set[int] = set()
+        for u in requested:
+            if u in seen_in_request:
+                continue
+            seen_in_request.add(u)
+            if u in existing:
+                skipped.append(u)
+            else:
+                existing.add(u)
+                added.append(u)
+        if added:
+            cfg.universes = sorted(existing)
+            controller.apply_config(cfg)
+        return JSONResponse({"ok": True, "added": added, "skipped": skipped})
 
     @app.delete("/api/universes/{port_address}")
     async def del_universe(port_address: int) -> JSONResponse:
@@ -372,7 +397,11 @@ class AllowSourceBody(BaseModel):
 
 
 class UniverseBody(BaseModel):
-    port_address: Annotated[int, Field(ge=0, le=0x7FFF)]
+    # Accept either a single universe ({"port_address": 9}) or a list
+    # ({"port_addresses": [1,2,3]}). The UI sends the list form post-v0.2.4;
+    # the single form is kept for back-compat / curl convenience.
+    port_address: Annotated[int, Field(ge=0, le=0x7FFF)] | None = None
+    port_addresses: list[Annotated[int, Field(ge=0, le=0x7FFF)]] | None = None
 
 
 # ---------- WS helpers ----------

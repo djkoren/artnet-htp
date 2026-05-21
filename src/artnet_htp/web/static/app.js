@@ -14,6 +14,39 @@
     version: null,             // {version, git_sha, built_at, image, last_firstboot_error}
   };
 
+  // ---- Helpers ----
+  // Parse a universe spec like "1-9", "0", "1,3,5-10" into a sorted, deduped
+  // array of port_address ints. Throws Error with a human-readable message on
+  // malformed input. Caps individual range size at 4096 so a typo like "1-999999"
+  // can't lock the browser.
+  function parseUniverseSpec(spec) {
+    const out = new Set();
+    const parts = spec.split(",").map((s) => s.trim()).filter(Boolean);
+    if (parts.length === 0) throw new Error("empty");
+    for (const part of parts) {
+      const rangeMatch = part.match(/^(\d+)\s*-\s*(\d+)$/);
+      if (rangeMatch) {
+        const a = parseInt(rangeMatch[1], 10);
+        const b = parseInt(rangeMatch[2], 10);
+        if (a > b) throw new Error(`bad range "${part}" — start > end`);
+        if (b - a + 1 > 4096) throw new Error(`range "${part}" too large (max 4096)`);
+        for (let i = a; i <= b; i++) {
+          if (i > 32767) throw new Error(`universe ${i} out of range (max 32767)`);
+          out.add(i);
+        }
+      } else if (/^\d+$/.test(part)) {
+        const n = parseInt(part, 10);
+        if (n > 32767) throw new Error(`universe ${n} out of range (max 32767)`);
+        out.add(n);
+      } else {
+        throw new Error(`"${part}" isn't a number or a range like 1-9`);
+      }
+    }
+    return Array.from(out).sort((x, y) => x - y);
+  }
+  // Exposed for ad-hoc browser-console testing; harmless otherwise.
+  window.__parseUniverseSpec = parseUniverseSpec;
+
   // ---- API ----
   async function api(path, opts = {}) {
     const res = await fetch(path, {
@@ -633,12 +666,30 @@
     document.getElementById("add-universe-form").onsubmit = async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
-      await api("/api/universes", {
-        method: "POST",
-        body: JSON.stringify({
-          port_address: parseInt(fd.get("port_address"), 10),
-        }),
-      });
+      const spec = String(fd.get("universes") || "").trim();
+      if (!spec) return;
+      let list;
+      try {
+        list = parseUniverseSpec(spec);
+      } catch (err) {
+        alert("Invalid universe input: " + err.message);
+        return;
+      }
+      if (list.length === 0) return;
+      if (list.length > 256 && !confirm(`Add ${list.length} universes?`)) return;
+      let result;
+      try {
+        result = await api("/api/universes", {
+          method: "POST",
+          body: JSON.stringify({ port_addresses: list }),
+        });
+      } catch (err) {
+        alert("Failed to add: " + err.message);
+        return;
+      }
+      if (result && result.skipped && result.skipped.length > 0) {
+        console.log(`Skipped already-present universes: ${result.skipped.join(", ")}`);
+      }
       e.target.reset();
       await loadConfig();
     };

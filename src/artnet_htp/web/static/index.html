@@ -144,13 +144,15 @@
       <p class="muted hint">
         Add the universe numbers your sources and receivers use. Use the number
         your console / pixel mapper displays. For Net/Sub/Universe consoles, the
-        flat value is <code>(Net&times;256) + (Sub&times;16) + Universe</code>. Most setups
-        only need a handful of single-digit numbers.
+        flat value is <code>(Net&times;256) + (Sub&times;16) + Universe</code>.
       </p>
       <div id="universe-chips"></div>
       <form id="add-universe-form" class="row">
-        <label>Universe <input name="port_address" type="number" min="0" max="32767" placeholder="0" required></label>
-        <button type="submit">Add universe</button>
+        <label>Universe(s)
+          <input name="universes" type="text" inputmode="text" placeholder="0  or  1-16  or  1,3,5-10" required>
+          <span class="muted hint">Single number, range like <code>1-16</code>, or comma-separated mix.</span>
+        </label>
+        <button type="submit">Add</button>
       </form>
     </section>
 
