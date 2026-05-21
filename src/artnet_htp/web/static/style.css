@@ -82,21 +82,6 @@ header h1 {
 .check-updates-btn:hover:not(:disabled) { background: var(--border); color: var(--text); }
 .check-updates-btn:disabled { opacity: 0.6; cursor: progress; }
 
-.restart-banner {
-  margin-top: 8px;
-  padding: 8px 12px;
-  background: rgba(210, 153, 34, 0.15);
-  border: 1px solid var(--warn);
-  border-radius: 4px;
-  font-size: 13px;
-  color: var(--text);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.restart-banner button {
-  margin-left: auto;
-}
 
 .button-like {
   background: var(--panel-2);

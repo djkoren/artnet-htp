@@ -566,17 +566,19 @@
   function bindForms() {
     document.getElementById("save-settings").onclick = async () => {
       const cfg = structuredClone(state.config);
-      const newBindIp = document.getElementById("cfg-bind-ip").value.trim() || "0.0.0.0";
-      const bindChanged = newBindIp !== cfg.bind_ip;
-      cfg.bind_ip = newBindIp;
+      // Advertised IP (formerly bind_ip): blank = 0.0.0.0 = auto-detect.
+      // As of v0.2.5 this applies live — no restart needed. The receiver
+      // always listens on all interfaces regardless of this value.
+      cfg.bind_ip = document.getElementById("cfg-bind-ip").value.trim() || "0.0.0.0";
       cfg.send_rate_hz = parseFloat(document.getElementById("cfg-send-rate").value);
       cfg.source_timeout_s = parseFloat(document.getElementById("cfg-source-timeout").value);
       cfg.send_keepalive_when_silent = document.getElementById("cfg-keepalive").checked;
       cfg.auto_allow_unknown_sources = document.getElementById("cfg-auto-allow").checked;
       await putConfig(cfg);
-      if (bindChanged) {
-        document.getElementById("restart-banner").hidden = false;
-      }
+      // The yellow restart banner used to pop here when bind_ip changed.
+      // We no longer need it — bind_ip is advertise-only and apply_config
+      // hot-applies it. The manual Restart button is still in the row for
+      // web.port changes or general "feels stuck" recovery.
     };
 
     const doRestart = async () => {
@@ -598,7 +600,6 @@
       alert("Service didn't come back within 30 seconds. SSH in and check `journalctl -u artnet-htp`.");
     };
     document.getElementById("restart-service").onclick = doRestart;
-    document.getElementById("restart-now-btn").onclick = doRestart;
 
     document.getElementById("check-updates-btn").onclick = async () => {
       const btn = document.getElementById("check-updates-btn");

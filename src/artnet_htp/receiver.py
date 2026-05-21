@@ -87,11 +87,38 @@ async def start_receiver(
     bind_ip: str = "0.0.0.0",
     port: int = ARTNET_PORT,
 ) -> tuple[asyncio.DatagramTransport, ArtNetReceiver]:
-    """Bind the receiver. Returns (transport, protocol). Close the transport to stop."""
+    """Bind the receiver. Returns (transport, protocol). Close the transport to stop.
+
+    `bind_ip` is what `socket.bind()` gets. In practice the controller passes
+    "0.0.0.0" so we listen on every interface — accepting ArtNet from any
+    network the Pi is on is almost always what the operator wants.
+
+    If a non-default bind_ip is requested and turns out to be unavailable
+    (EADDRNOTAVAIL — IP isn't on any live interface), we fall back to
+    "0.0.0.0" rather than crashing. Previously this would crash-loop the
+    service under systemd if the operator set a bind IP that DHCP later
+    reassigned.
+    """
     loop = asyncio.get_running_loop()
-    transport, protocol = await loop.create_datagram_endpoint(
-        lambda: ArtNetReceiver(state, on_artpoll),
-        local_addr=(bind_ip, port),
-        allow_broadcast=True,
-    )
-    return transport, protocol  # type: ignore[return-value]
+
+    async def _bind(addr: str) -> tuple[asyncio.DatagramTransport, ArtNetReceiver]:
+        t, p = await loop.create_datagram_endpoint(
+            lambda: ArtNetReceiver(state, on_artpoll),
+            local_addr=(addr, port),
+            allow_broadcast=True,
+        )
+        return t, p  # type: ignore[return-value]
+
+    try:
+        return await _bind(bind_ip)
+    except OSError as e:
+        # errno 99 = EADDRNOTAVAIL. Don't take the merger down — degrade to
+        # 0.0.0.0 and warn loudly. Any other OSError is genuinely wrong
+        # (port already in use, etc.) and should propagate.
+        if e.errno != 99 or bind_ip == "0.0.0.0":
+            raise
+        log.warning(
+            "couldn't bind UDP receiver to %s:%d (%s) — falling back to 0.0.0.0",
+            bind_ip, port, e,
+        )
+        return await _bind("0.0.0.0")

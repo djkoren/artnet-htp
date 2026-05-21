@@ -3,6 +3,12 @@ Description=ArtNet HTP Merger
 Documentation=https://art-net.org.uk/
 After=network-online.target
 Wants=network-online.target
+# Defense against runaway crash-loops: stop trying after 10 failures in
+# 5 minutes. v0.2.4 hit a restart counter of 143 before we caught a bad
+# bind_ip in the wild. The fix (always-bind-0.0.0.0 receiver) makes that
+# class of failure impossible, but capping retries is cheap insurance.
+StartLimitBurst=10
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple

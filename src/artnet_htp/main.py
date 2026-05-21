@@ -67,15 +67,20 @@ class Controller:
         return self._config
 
     def apply_config(self, new_cfg: Config) -> None:
-        """Hot-apply a new config: persist YAML, update state, update sender rate,
-        refresh poll identity. Bind IP and web host/port require a restart and
-        are not applied live (web layer just notes the discrepancy).
+        """Hot-apply a new config: persist YAML, update state, update sender
+        rate, refresh poll identity (including advertised IP).
+
+        Web host/port still require a restart (uvicorn is bound at startup).
+        bind_ip used to require a restart too; since v0.2.5 it's
+        advertise-only and is applied live here.
         """
         save_config(self.config_path, new_cfg)
         self._config = new_cfg
         self._apply_to_state(new_cfg)
         self.sender.set_rate(new_cfg.send_rate_hz)
-        # Refresh node identity if names changed
+        # Refresh node identity (advertised IP + names).
+        adv_ip = new_cfg.bind_ip if new_cfg.bind_ip != "0.0.0.0" else detect_local_ip()
+        self.poll.identity.bind_ip = adv_ip
         self.poll.identity.short_name = new_cfg.node.short_name
         self.poll.identity.long_name = new_cfg.node.long_name
 
@@ -96,16 +101,21 @@ class Controller:
         async def on_artpoll(src_ip: str, src_port: int) -> None:
             await self.poll.respond_to(src_ip, src_port)
 
+        # Receiver ALWAYS binds 0.0.0.0 so ArtNet from any interface lands.
+        # config.bind_ip is treated purely as the *advertised* IP (see line
+        # ~51 where we feed it to PollReplyService). This separation prevents
+        # a misconfigured bind_ip from crash-looping the service under
+        # systemd, which is what bit us pre-v0.2.5.
         self._receiver_transport, _ = await start_receiver(
             self.state,
             on_artpoll,
-            bind_ip=self._config.bind_ip,
+            bind_ip="0.0.0.0",
             port=ARTNET_PORT,
         )
         self._poll_task = asyncio.create_task(self.poll.run_periodic())
         log.info(
-            "merger online: bind=%s sources=%d outputs=%d universes=%s rate=%dHz",
-            self._config.bind_ip,
+            "merger online: advertised_ip=%s sources=%d outputs=%d universes=%s rate=%dHz",
+            self.poll.identity.bind_ip,
             len(self._config.sources),
             len(self._config.outputs),
             self._config.universes,
