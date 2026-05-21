@@ -1,0 +1,7 @@
+# Custom pi-gen stage for the artnet-htp merger.
+#
+# Empty in plan step 4 (we build plain Bookworm Lite first to prove the
+# pipeline). Step 5 fills this in with:
+#   - 00-packages           : apt-installed deps (python3-venv, etc.)
+#   - 00-run-chroot.sh      : copy source, useradd, install.sh, enable systemd
+#   - files/                : systemd units, build-info.json template, etc.

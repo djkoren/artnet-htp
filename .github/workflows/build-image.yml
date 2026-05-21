@@ -1,79 +1,152 @@
 name: Build Pi SD card image
 
 # Triggered on tag push (e.g. v0.2.0, v1.0.0-beta1).
-# Produces an artnet-htp-<tag>.img.xz file and attaches it to the GitHub Release
-# for the same tag (creating the release if it doesn't exist yet).
+# Produces an artnet-htp-<tag>.img.xz file (via pi-gen) and attaches it to
+# the GitHub Release for the same tag. The release is auto-created.
 #
-# This file is currently a skeleton — it produces a dummy artifact so we can
-# verify the tag → release pipeline end-to-end before plugging pi-gen in.
-# Step 4 of the build plan replaces the "build dummy artifact" step with a
-# real pi-gen invocation.
+# Also supports manual workflow_dispatch for debugging — picks up the tip of
+# `main` and outputs a release tagged with the run ID.
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to attach to (e.g. v0.0.1-debug). Empty = no release, just the artifact.'
+        required: false
+        default: ''
+
+# pi-gen needs to be cloned at a pinned commit so a surprise upstream change
+# can't break our builds. Bump this deliberately.
+env:
+  PI_GEN_REPO: RPi-Distro/pi-gen
+  PI_GEN_REF: 4ad56cc850fa60adcc7f07dc15879bc95cc1d281   # arm64 branch, 2026-04-16
 
 permissions:
   contents: write   # needed to attach assets to the Release
 
 jobs:
   build:
-    name: Build image (${{ github.ref_name }})
+    name: Build image
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Show context
+      - name: Resolve tag/name for this build
+        id: vars
         run: |
-          echo "tag       : ${{ github.ref_name }}"
-          echo "sha       : ${{ github.sha }}"
-          echo "actor     : ${{ github.actor }}"
-          echo "event     : ${{ github.event_name }}"
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            TAG="${{ github.ref_name }}"
+          else
+            TAG="manual-${{ github.run_id }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image_name=artnet-htp-${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Build tag: $TAG"
 
-      - name: Free up disk (pi-gen will need ~15GB)
+      - name: Free up runner disk
         run: |
-          # We don't actually need this for the placeholder step, but doing
-          # it now matches what the real pi-gen step will need. Reclaims
-          # ~10GB of preinstalled toolchains we won't use.
-          sudo rm -rf /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
-          df -h / | tail -1
+          # pi-gen needs ~15-20GB free during build (rootfs work copy + final
+          # image + apt caches). The default GH runner image has ~14GB free,
+          # but ~10GB of that is preinstalled toolchains we don't use.
+          sudo rm -rf /usr/local/lib/android \
+                      /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL \
+                      /opt/hostedtoolcache/Java_* \
+                      /opt/hostedtoolcache/dotnet \
+                      /opt/hostedtoolcache/go || true
+          sudo apt-get clean
+          df -h /
 
-      - name: Build placeholder image
-        id: build
+      - name: Install qemu-user-static + binfmt
         run: |
-          # PLACEHOLDER: real pi-gen build replaces this step in plan-step 4.
-          # For now we just emit a tiny .img.xz so the release-attachment flow
-          # is exercised end-to-end.
-          mkdir -p out
-          OUT="out/artnet-htp-${{ github.ref_name }}.img.xz"
-          printf 'placeholder image — replace with real pi-gen output in step 4\n' \
-            | xz -9 > "$OUT"
-          ls -lh out/
-          echo "asset_path=$OUT" >> "$GITHUB_OUTPUT"
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-user-static binfmt-support coreutils quilt parted \
+            qemu-utils dosfstools zip libcap2-bin grep rsync xz-utils \
+            file git curl bc psmisc gpg pigz arch-test
+          # Activate qemu-aarch64 in binfmt_misc so chroot can run arm64 bins.
+          sudo update-binfmts --enable qemu-aarch64 || true
+          # Sanity check
+          docker run --rm --platform linux/arm64 -t \
+            arm64v8/debian:bookworm-slim true || \
+            echo "(docker arm64 probe not required; binfmt_misc is what we need)"
 
-      - name: Emit build-info.json (for future image baking)
+      - name: Clone pi-gen at pinned commit
         run: |
-          cat > out/build-info.json <<EOF
+          git clone --no-checkout https://github.com/${{ env.PI_GEN_REPO }} pi-gen
+          cd pi-gen
+          git checkout "${{ env.PI_GEN_REF }}"
+          echo "pi-gen HEAD: $(git rev-parse HEAD)"
+
+      - name: Apply our pi-gen config
+        run: |
+          # Drop our config in as `config` at the pi-gen root.
+          cp image/pi-gen-config pi-gen/config
+          # Override IMG_NAME with the resolved tag so the output filename
+          # includes the version.
+          echo "IMG_NAME=${{ steps.vars.outputs.image_name }}" >> pi-gen/config
+          echo "===== final pi-gen config ====="
+          cat pi-gen/config
+          echo "==============================="
+
+      - name: Build image (this is the slow part — 25-40min)
+        run: |
+          cd pi-gen
+          # build.sh wants root for chroot + mount operations.
+          sudo ./build.sh
+          echo "===== build output ====="
+          ls -lh deploy/
+
+      - name: Locate output image
+        id: locate
+        run: |
+          IMG_XZ=$(ls pi-gen/deploy/*.img.xz 2>/dev/null | head -1)
+          if [ -z "$IMG_XZ" ]; then
+            echo "::error::No .img.xz produced. Listing deploy/ for diagnosis:"
+            ls -la pi-gen/deploy/ || true
+            exit 1
+          fi
+          echo "img_xz=$IMG_XZ" >> "$GITHUB_OUTPUT"
+          ls -lh "$IMG_XZ"
+
+      - name: Emit build-info.json
+        run: |
+          cat > build-info.json <<EOF
           {
-            "version": "${{ github.ref_name }}",
+            "version": "${{ steps.vars.outputs.tag }}",
             "git_sha": "${{ github.sha }}",
             "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "image": "artnet-htp-${{ github.ref_name }}"
+            "image": "${{ steps.vars.outputs.image_name }}"
           }
           EOF
-          cat out/build-info.json
+          cat build-info.json
 
-      - name: Attach to GitHub Release
+      - name: Upload as workflow artifact (also for manual_dispatch)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.vars.outputs.image_name }}
+          path: |
+            ${{ steps.locate.outputs.img_xz }}
+            build-info.json
+          retention-days: 14
+
+      - name: Attach to GitHub Release (tag pushes only)
+        if: github.event_name == 'push' && github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ steps.vars.outputs.tag }}
+          name: ${{ steps.vars.outputs.tag }}
           generate_release_notes: true
           files: |
-            out/artnet-htp-${{ github.ref_name }}.img.xz
-            out/build-info.json
-          # Mark releases with a "-" suffix (e.g. v0.0.1-test) as prereleases
-          # so they don't show as the "Latest" on the repo page.
-          prerelease: ${{ contains(github.ref_name, '-') }}
+            ${{ steps.locate.outputs.img_xz }}
+            build-info.json
+          # Tags with a "-" suffix (e.g. v0.0.1-test) are prereleases so they
+          # don't show as the "Latest" on the repo page.
+          prerelease: ${{ contains(steps.vars.outputs.tag, '-') }}
