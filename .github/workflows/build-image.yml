@@ -22,7 +22,10 @@ on:
 # can't break our builds. Bump this deliberately.
 env:
   PI_GEN_REPO: RPi-Distro/pi-gen
-  PI_GEN_REF: 4ad56cc850fa60adcc7f07dc15879bc95cc1d281   # arm64 branch, 2026-04-16
+  # Last bookworm-arm64 release tag (2025-11-24). After this, pi-gen's arm64
+  # branch switched to building Trixie (Debian 13), which isn't shipping in
+  # Raspberry Pi OS yet. Stay on bookworm for now.
+  PI_GEN_REF: 67262a4ad0959aab2a9d84a6392b1967999e8f50
 
 permissions:
   contents: write   # needed to attach assets to the Release
@@ -76,14 +79,10 @@ jobs:
       - name: Install pi-gen build dependencies
         run: |
           sudo apt-get update -qq
-          # qemu-user-static provides the STATIC qemu binaries
-          # (qemu-aarch64-static, etc.) that debootstrap copies into the
-          # chroot. Pi-gen's depends_check looks for non-suffixed names
-          # (qemu-arm, qemu-aarch64) so we symlink below.
-          # qemu-user-binfmt conflicts with -static and is what pi-gen names
-          # in its error message, but the -static package is what we actually
-          # need — pi-gen's check just isn't picky about the package as long
-          # as the binary is in PATH.
+          # qemu-user-static provides /usr/bin/qemu-arm-static and friends.
+          # Pi-gen at 67262a4 (bookworm tag) names them in its depends file
+          # as `qemu-arm-static:qemu-user-static`, so this matches directly —
+          # no symlinks needed.
           sudo apt-get install -y --no-install-recommends \
             quilt parted \
             qemu-user-static binfmt-support \
@@ -91,9 +90,9 @@ jobs:
             libcap2-bin grep rsync xz-utils file git curl bc \
             qemu-utils kpartx gpg pigz arch-test \
             coreutils psmisc kmod xxd e2fsprogs
-          # Symlink the un-suffixed names so pi-gen's depends_check passes.
-          sudo ln -sf /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64
-          sudo ln -sf /usr/bin/qemu-arm-static /usr/bin/qemu-arm
+          # Refresh debian-archive-keyring on the host so debootstrap stamps
+          # the chroot with up-to-date keys.
+          sudo apt-get install -y --reinstall debian-archive-keyring
           # Verify binfmt registration is live.
           sudo update-binfmts --display qemu-aarch64 | head -5 || true
           cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>&1 | head -3 || true
