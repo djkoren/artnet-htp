@@ -1,0 +1,4 @@
+# Presence of this file tells pi-gen to export this stage's rootfs as an
+# image artifact. IMG_SUFFIX is appended to IMG_NAME — keep "-lite" so the
+# filename signals "Bookworm Lite + our merger" (matches stage2's suffix).
+IMG_SUFFIX="-lite"

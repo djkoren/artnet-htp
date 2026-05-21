@@ -117,6 +117,12 @@ jobs:
           # live during the build.
           cp -a image/stage-artnet-htp pi-gen/
 
+          # Suppress stage2's image export — our stage cascades from stage2
+          # and is what we actually want as the final artifact. Without
+          # this, pi-gen emits two .img.xz files (one from stage2, one from
+          # us) and the "first one" picker can grab the wrong one.
+          touch pi-gen/stage2/SKIP_IMAGES
+
           # Sync our source tree into the stage's files/ dir so 00-run.sh
           # can rsync it into the chroot. Exclude the venv, git, image
           # build files, and the workflow files themselves.
