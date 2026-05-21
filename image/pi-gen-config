@@ -16,7 +16,9 @@ RELEASE=bookworm
 #   stage-artnet-htp = our custom stage (added in plan step 5; empty in step 4)
 #
 # Skip stage3..stage5 (desktop variants) — we ship Lite only.
-STAGE_LIST="stage0 stage1 stage2"
+# stage-artnet-htp is our custom stage; it's a no-op when the directory contains
+# only a placeholder (step 4 verification). Step 5 fills it in.
+STAGE_LIST="stage0 stage1 stage2 stage-artnet-htp"
 
 # Hostname baked into the image. Avahi/mDNS lets you reach it via
 # http://artnet-htp.local:8080 on any LAN that has mDNS working (most do).
@@ -27,14 +29,15 @@ TARGET_HOSTNAME=artnet-htp
 # stock Raspberry Pi OS behavior.
 ENABLE_SSH=0
 
-# No default username/password. To create a login on first boot, drop a
-# `userconf.txt` on the boot partition with the format `username:hashed-password`
-# (e.g. produced by `openssl passwd -6`). pi-gen's userconf-pi.service handles
-# the rest. Without this, the system user `artnet` (no shell) is the only
-# account — fine since you reach the merger via http://, not ssh://.
-FIRST_USER_NAME=""
-FIRST_USER_PASS=""
-DISABLE_FIRST_BOOT_USER_RENAME=1
+# Pi OS's userconf-pi.service is enabled by default and rejects login until
+# the operator either drops `userconf.txt` on the boot partition (format
+# `username:hashed-password` from `openssl passwd -6`) or sets one via
+# console. We don't override FIRST_USER_NAME/FIRST_USER_PASS — pi-gen's
+# default behavior is what we want: image ships without a usable login,
+# operator opts in if they need SSH.
+#
+# The merger runs as the `artnet` system user (no shell, no password).
+# The web UI is the primary control surface; SSH is only for emergencies.
 
 # Locale / timezone — minimal to keep image small.
 LOCALE_DEFAULT=en_US.UTF-8

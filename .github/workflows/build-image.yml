@@ -114,6 +114,10 @@ jobs:
             --exclude='.github' --exclude='pi-gen' \
             ./ pi-gen/stage-artnet-htp/files/artnet-htp-src/
 
+          # Copy the firstboot service + script (kept under image/ in the
+          # repo so they don't ship inside the running merger's source tree).
+          cp -a image/firstboot pi-gen/stage-artnet-htp/files/firstboot
+
           # Bake a build-info.json into the stage so 00-run.sh can copy it to
           # /etc/artnet-htp/. Surfaced at runtime by /api/version.
           cat > pi-gen/stage-artnet-htp/files/build-info.json <<EOF

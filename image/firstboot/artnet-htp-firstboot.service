@@ -1,0 +1,23 @@
+[Unit]
+Description=ArtNet HTP first-boot config import
+Documentation=https://github.com/djkoren/artnet-htp
+# Order: must run BEFORE artnet-htp.service so the merger boots with the
+# operator's config (not the default), but AFTER local-fs.target so
+# /boot/firmware/ is mounted.
+After=local-fs.target
+Before=artnet-htp.service
+
+# Only fire when an operator actually dropped a config file on the boot
+# partition. Without this, every boot would run the script.
+ConditionPathExists=/boot/firmware/artnet-htp-config.yaml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/artnet-htp/firstboot.sh
+# Logging goes to journald so it shows up in `journalctl -u artnet-htp-firstboot`.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
