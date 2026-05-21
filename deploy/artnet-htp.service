@@ -18,11 +18,13 @@ StandardOutput=journal
 StandardError=journal
 
 # Lock-down (best-effort — we still need network and the binary)
-NoNewPrivileges=true
+# NoNewPrivileges has to stay OFF because it strips AmbientCapabilities,
+# which we need to bind port 80 as a non-root user.
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/etc/artnet-htp /var/log/artnet-htp
+ReadWritePaths=/etc/artnet-htp /var/log/artnet-htp /opt/artnet-htp
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -32,8 +34,11 @@ MemoryDenyWriteExecute=false  # uvicorn uses some JIT-ish things; keep this off
 RestrictRealtime=true
 RestrictSUIDSGID=true
 
-# UDP 6454 (ArtNet) and the configured web port must be reachable.
-# No CAP_NET_BIND needed — 6454 and 8080 are unprivileged.
+# UDP 6454 (ArtNet) is unprivileged. Port 80 (default web UI) requires
+# CAP_NET_BIND_SERVICE — the unit grants it ambiently so the `artnet`
+# user can bind it without sudo.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target

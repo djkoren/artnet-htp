@@ -40,9 +40,9 @@ pre-configured:
 Eject the SD card, slot it into the Pi, plug in **wired Ethernet** and
 power. After ~45 seconds the merger is up and reachable at:
 
-- **`http://artnet-htp.local:8080`** — works on any device on the same LAN
+- **`http://artnet-htp.local/`** — works on any device on the same LAN
   with mDNS support (Mac, iOS, recent Windows, recent Linux).
-- **`http://<pi-ip>:8080`** — works always. Find the IP via your router's
+- **`http://<pi-ip>/`** — works always. Find the IP via your router's
   DHCP table.
 
 **SSH** is enabled by default with these credentials:
@@ -114,7 +114,8 @@ cp config.example.yaml config.yaml      # edit IPs/universes
 artnet-htp --config config.yaml
 ```
 
-Open `http://localhost:8080`.
+Open `http://localhost:8080` (set `web.port: 8080` in your dev config — port 80
+requires root or the systemd unit's capability grant).
 
 ### Local end-to-end test (no Pi needed)
 

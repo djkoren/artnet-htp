@@ -59,9 +59,13 @@ class OutputCfg(BaseModel):
 
 
 class WebCfg(BaseModel):
+    # Port 80 lets operators reach the UI at http://<pi>/ with no port
+    # suffix — matches the FPP/etc. appliance UX. The systemd unit grants
+    # CAP_NET_BIND_SERVICE so the non-root `artnet` user can bind a
+    # privileged port. Override here for dev / custom setups.
     model_config = ConfigDict(extra="forbid")
     host: str = "0.0.0.0"
-    port: Annotated[int, Field(ge=1, le=65535)] = 8080
+    port: Annotated[int, Field(ge=1, le=65535)] = 80
 
 
 class NodeCfg(BaseModel):

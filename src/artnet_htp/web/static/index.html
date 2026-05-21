@@ -11,6 +11,11 @@
     <h1>ArtNet HTP Merger</h1>
     <div class="header-right">
       <span id="version-badge" class="version-badge" title="version">v…</span>
+      <a id="update-badge" class="update-badge" href="#" hidden target="_blank" rel="noopener">
+        Update available
+      </a>
+      <button id="check-updates-btn" class="check-updates-btn" type="button"
+              title="Check GitHub for a newer release">Check for updates</button>
       <div id="conn-pill" class="pill disconnected">disconnected</div>
     </div>
   </header>
@@ -19,7 +24,10 @@
     <section id="settings-section">
       <h2>Settings</h2>
       <div class="row">
-        <label>Bind IP <input id="cfg-bind-ip" disabled></label>
+        <label>Bind IP
+          <input id="cfg-bind-ip" placeholder="0.0.0.0">
+          <span class="muted hint">0.0.0.0 = listen on all interfaces &amp; auto-detect advertised IP. Restart required.</span>
+        </label>
         <label>Send rate (Hz) <input id="cfg-send-rate" type="number" min="1" max="60" step="1"></label>
         <label>Source timeout (s) <input id="cfg-source-timeout" type="number" min="0.1" max="60" step="0.1"></label>
       </div>
@@ -27,6 +35,13 @@
         <label><input id="cfg-keepalive" type="checkbox"> Send zeros when all sources silent</label>
         <label><input id="cfg-auto-allow" type="checkbox"> Auto-allow unknown sources</label>
         <button id="save-settings">Save settings</button>
+        <button id="restart-service" class="subtle" type="button" title="Restart the merger process. Required after changing Bind IP or web port.">
+          Restart service
+        </button>
+      </div>
+      <div id="restart-banner" class="restart-banner" hidden>
+        Bind IP / port changes take effect after restart.
+        <button id="restart-now-btn" type="button">Restart now</button>
       </div>
       <div class="row stats">
         <span>Malformed packets: <b id="stat-malformed">0</b></span>

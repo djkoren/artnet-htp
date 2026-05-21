@@ -126,6 +126,71 @@ def create_app(controller) -> FastAPI:
     async def get_state() -> JSONResponse:
         return JSONResponse(controller.state.snapshot())
 
+    # ---- REST: restart self ----
+    # Schedules os._exit(0) after a tiny delay so the response can flush.
+    # Relies on the systemd unit's `Restart=always` to bring us back up.
+    # Without systemd (a dev `python -m artnet_htp` run), this just kills
+    # the process — operator restarts manually.
+    @app.post("/api/restart")
+    async def post_restart() -> JSONResponse:
+        async def _exit_soon() -> None:
+            await asyncio.sleep(0.3)
+            log.info("restart requested via /api/restart — exiting for systemd to restart us")
+            import os
+            os._exit(0)
+        asyncio.create_task(_exit_soon())
+        return JSONResponse({"ok": True, "restarting": True})
+
+    # ---- REST: GitHub update check ----
+    # Read-only. Compares running version to the latest non-prerelease tag
+    # at github.com/djkoren/artnet-htp/releases. Returns a deep-link to the
+    # release page; the actual flash/update workflow lives off-Pi (step 8b
+    # will add in-place install).
+    @app.get("/api/update/status")
+    async def get_update_status() -> JSONResponse:
+        current = __version__
+        try:
+            if BUILD_INFO_PATH.is_file():
+                with BUILD_INFO_PATH.open("r", encoding="utf-8") as f:
+                    baked = json.load(f)
+                if "version" in baked:
+                    current = baked["version"]
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        import urllib.error
+        import urllib.request
+
+        def _fetch_latest() -> dict:
+            req = urllib.request.Request(
+                "https://api.github.com/repos/djkoren/artnet-htp/releases/latest",
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "artnet-htp"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read())
+
+        try:
+            data = await asyncio.to_thread(_fetch_latest)
+        except urllib.error.URLError as e:
+            return JSONResponse({"current": current, "error": f"can't reach GitHub: {e.reason}"})
+        except Exception as e:  # noqa: BLE001 — surface to operator
+            return JSONResponse({"current": current, "error": f"check failed: {e}"})
+
+        latest = data.get("tag_name", "")
+        release_url = data.get("html_url", "https://github.com/djkoren/artnet-htp/releases")
+
+        # Normalize comparison: strip leading 'v' from both sides.
+        def _norm(t: str) -> str:
+            return t.lstrip("vV").strip()
+
+        update_available = bool(latest) and _norm(latest) != _norm(current)
+        return JSONResponse({
+            "current": current,
+            "latest": latest,
+            "release_url": release_url,
+            "update_available": update_available,
+        })
+
     # ---- REST: config ----
     @app.get("/api/config")
     async def get_config() -> JSONResponse:

@@ -1,6 +1,6 @@
 # Default config baked into the image. The merger boots with empty source/
 # output/universe lists so it does nothing harmful out of the box — you
-# configure it via the web UI at http://artnet-htp.local:8080 after first
+# configure it via the web UI at http://artnet-htp.local/ after first
 # boot, OR drop a pre-made `artnet-htp-config.yaml` on the SD card's boot
 # partition before first boot and the first-boot service will import it.
 
@@ -16,7 +16,7 @@ universes: []
 
 web:
   host: 0.0.0.0
-  port: 8080
+  port: 80
 
 node:
   short_name: "HTP Merger"

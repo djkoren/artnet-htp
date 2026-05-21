@@ -533,11 +533,69 @@
   function bindForms() {
     document.getElementById("save-settings").onclick = async () => {
       const cfg = structuredClone(state.config);
+      const newBindIp = document.getElementById("cfg-bind-ip").value.trim() || "0.0.0.0";
+      const bindChanged = newBindIp !== cfg.bind_ip;
+      cfg.bind_ip = newBindIp;
       cfg.send_rate_hz = parseFloat(document.getElementById("cfg-send-rate").value);
       cfg.source_timeout_s = parseFloat(document.getElementById("cfg-source-timeout").value);
       cfg.send_keepalive_when_silent = document.getElementById("cfg-keepalive").checked;
       cfg.auto_allow_unknown_sources = document.getElementById("cfg-auto-allow").checked;
       await putConfig(cfg);
+      if (bindChanged) {
+        document.getElementById("restart-banner").hidden = false;
+      }
+    };
+
+    const doRestart = async () => {
+      if (!confirm("Restart the merger? The UI will reconnect in a few seconds.")) return;
+      try {
+        await api("/api/restart", { method: "POST" });
+      } catch (e) {
+        // The server may close the socket before responding; that's normal.
+      }
+      // Poll /api/state until it answers again, then reload.
+      const start = Date.now();
+      while (Date.now() - start < 30000) {
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          const r = await fetch("/api/state");
+          if (r.ok) { window.location.reload(); return; }
+        } catch (_e) { /* still down */ }
+      }
+      alert("Service didn't come back within 30 seconds. SSH in and check `journalctl -u artnet-htp`.");
+    };
+    document.getElementById("restart-service").onclick = doRestart;
+    document.getElementById("restart-now-btn").onclick = doRestart;
+
+    document.getElementById("check-updates-btn").onclick = async () => {
+      const btn = document.getElementById("check-updates-btn");
+      const badge = document.getElementById("update-badge");
+      const orig = btn.textContent;
+      btn.textContent = "Checking…";
+      btn.disabled = true;
+      badge.hidden = true;
+      try {
+        const r = await fetch("/api/update/status");
+        if (!r.ok) throw new Error("status " + r.status);
+        const j = await r.json();
+        if (j.update_available) {
+          badge.textContent = `Update to ${j.latest}`;
+          badge.href = j.release_url || "https://github.com/djkoren/artnet-htp/releases";
+          badge.hidden = false;
+          btn.textContent = "Up to date check complete";
+        } else if (j.error) {
+          btn.textContent = "Can't reach GitHub";
+          btn.title = j.error;
+        } else {
+          btn.textContent = "You're on the latest";
+        }
+      } catch (e) {
+        btn.textContent = "Check failed";
+        btn.title = String(e);
+      } finally {
+        btn.disabled = false;
+        setTimeout(() => { btn.textContent = orig; btn.title = "Check GitHub for a newer release"; }, 6000);
+      }
     };
 
     document.getElementById("add-source-form").onsubmit = async (e) => {
