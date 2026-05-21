@@ -24,20 +24,34 @@ STAGE_LIST="stage0 stage1 stage2 stage-artnet-htp"
 # http://artnet-htp.local:8080 on any LAN that has mDNS working (most do).
 TARGET_HOSTNAME=artnet-htp
 
-# SSH OFF by default. To enable on a flashed card, drop an empty file named
-# `ssh` (no extension) onto the boot partition before booting. This matches
-# stock Raspberry Pi OS behavior.
-ENABLE_SSH=0
+# SSH ON by default. The image ships flash-and-go (FPP-style), so the
+# operator can reach the Pi over the LAN without a monitor+keyboard. If
+# you want to lock this down for a specific deployment, change `htp`'s
+# password (`passwd htp`) and/or `systemctl disable ssh` post-boot.
+ENABLE_SSH=1
 
-# Pi OS's userconf-pi.service is enabled by default and rejects login until
-# the operator either drops `userconf.txt` on the boot partition (format
-# `username:hashed-password` from `openssl passwd -6`) or sets one via
-# console. We don't override FIRST_USER_NAME/FIRST_USER_PASS — pi-gen's
-# default behavior is what we want: image ships without a usable login,
-# operator opts in if they need SSH.
+# Default login credentials baked into the image (matches the FPP model:
+# fpp/falcon). Username/password are advertised in the README so any
+# operator can flash and immediately SSH in.
 #
-# The merger runs as the `artnet` system user (no shell, no password).
-# The web UI is the primary control surface; SSH is only for emergencies.
+#   username: htp
+#   password: artnet
+#
+# DISABLE_FIRST_BOOT_USER_RENAME=1 stops pi-gen from installing the
+# userconfig.service that hijacks tty1 on first boot demanding a fresh
+# username + password — we already have a working account, no prompt
+# needed.
+#
+# SECURITY NOTE: identical default creds on every unit is fine for a LAN-
+# only production-show Pi. If you bridge a unit to the public internet,
+# change the password (`sudo passwd htp`) or disable SSH.
+#
+# The `htp` user is the login account. A separate non-login system user
+# `artnet` (no shell, no password) is created in stage-artnet-htp and
+# runs the merger service.
+FIRST_USER_NAME=htp
+FIRST_USER_PASS=artnet
+DISABLE_FIRST_BOOT_USER_RENAME=1
 
 # Locale / timezone — minimal to keep image small.
 LOCALE_DEFAULT=en_US.UTF-8

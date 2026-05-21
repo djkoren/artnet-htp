@@ -26,17 +26,14 @@ transparently.
 ### 3. (Optional) Pre-configure on the boot partition before ejecting
 
 After flashing finishes, the SD card's `bootfs` partition is still mounted
-on your Mac (or Windows/Linux). Drop any of these files onto it to control
-first-boot behavior:
+on your Mac (or Windows/Linux). The image is **flash-and-go** — you don't
+need to add anything for it to boot, SSH, or serve the web UI. The only
+file worth dropping is your exported config so the unit comes up
+pre-configured:
 
 | File on `bootfs` | Effect |
 |---|---|
-| `ssh` (empty file, no extension) | Enable SSH on first boot |
-| `userconf.txt` (`username:hashed-password`) | Create a login user. Generate the hash with `openssl passwd -6 mypassword` |
 | `artnet-htp-config.yaml` | Auto-import as the merger's config on first boot. **Export from a working merger via the UI** to skip reconfiguring every venue. |
-
-None of these are required. With nothing dropped, the Pi boots, runs the
-merger on its DHCP'd IP, and is reachable via the web UI only.
 
 ### 4. Boot
 
@@ -47,6 +44,21 @@ power. After ~45 seconds the merger is up and reachable at:
   with mDNS support (Mac, iOS, recent Windows, recent Linux).
 - **`http://<pi-ip>:8080`** — works always. Find the IP via your router's
   DHCP table.
+
+**SSH** is enabled by default with these credentials:
+
+| Username | Password |
+|---|---|
+| `htp` | `artnet` |
+
+```bash
+ssh htp@artnet-htp.local        # or ssh htp@<pi-ip>
+```
+
+Same model as FPP (`fpp`/`falcon`). Identical defaults on every unit are
+fine on a private show LAN; if a Pi will be reachable from a hostile
+network, change the password (`sudo passwd htp`) or disable SSH
+(`sudo systemctl disable --now ssh`).
 
 ### 5. Configure in the UI
 
@@ -64,8 +76,8 @@ The Pi runs offline at the venue, so updates work like FPP:
 3. Download the new release `.img.xz` from the Releases page.
 4. Flash a fresh SD card with Pi Imager.
 5. Drop the saved YAML onto the new card's boot partition as
-   `artnet-htp-config.yaml`. Drop `ssh` and `userconf.txt` too if you want
-   SSH access.
+   `artnet-htp-config.yaml`. (SSH is already enabled in the image — no
+   extra files needed.)
 6. Swap the new card into the Pi, power on. It boots with your old config
    already applied.
 
