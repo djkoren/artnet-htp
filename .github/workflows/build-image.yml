@@ -64,25 +64,35 @@ jobs:
           sudo apt-get clean
           df -h /
 
+      - name: Set up QEMU binfmt for arm64 emulation
+        # The runner is x86_64 but pi-gen needs to run arm64 binaries in chroot
+        # (debootstrap second-stage, package configuration, our pip install).
+        # docker/setup-qemu-action handles all the binfmt_misc registration
+        # via a privileged Docker container — the de-facto standard pattern.
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Install pi-gen build dependencies
         run: |
-          # Full dep list from pi-gen's README + binfmt activation. pi-gen runs
-          # an internal `dependencies_check` that exits non-zero with a hint
-          # naming the specific package — keep this list complete.
+          # Full dep list from pi-gen's `depends` file. pi-gen's
+          # dependencies_check tests for each binary in PATH and prints the
+          # missing package name on failure.
           sudo apt-get update -qq
-          # Pi-gen requires qemu-user-binfmt specifically (its dependency_check
-          # rejects qemu-user-static even though both packages provide qemu).
-          # The two conflict, so install only qemu-user-binfmt here.
+          # qemu-user-binfmt provides /usr/bin/qemu-arm and qemu-aarch64
+          # binaries that pi-gen invokes by name. It also installs a dpkg
+          # trigger that registers binfmt entries (which docker/setup-qemu
+          # above also handles, so this is belt + suspenders).
           sudo apt-get install -y --no-install-recommends \
             quilt parted \
             qemu-user-binfmt binfmt-support \
             debootstrap zerofree zip dosfstools libarchive-tools \
             libcap2-bin grep rsync xz-utils file git curl bc \
             qemu-utils kpartx gpg pigz arch-test \
-            coreutils psmisc
-          # Confirm aarch64 binfmt is registered (qemu-user-binfmt registers
-          # automatically via dpkg trigger; this is just a visibility step).
+            coreutils psmisc kmod xxd e2fsprogs
+          # Verify binfmt registration is live.
           sudo update-binfmts --display qemu-aarch64 | head -5 || true
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>&1 | head -3 || true
 
       - name: Clone pi-gen at pinned commit
         run: |
