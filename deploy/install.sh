@@ -75,11 +75,20 @@ else
   echo "==> config exists at $CONFIG_DIR/config.yaml (left untouched)"
 fi
 
-# Install systemd unit
+# Install systemd unit. Gated so we can run this same script inside a pi-gen
+# chroot (where systemd isn't actually up): `systemctl enable` still creates
+# the right symlinks because it's a static operation, but `daemon-reload`
+# would fail. On a live Pi, both run normally.
 echo "==> installing systemd unit"
 install -m 644 "$SOURCE_DIR/deploy/artnet-htp.service" /etc/systemd/system/artnet-htp.service
-systemctl daemon-reload
-systemctl enable "$SERVICE_NAME"
+if command -v systemctl >/dev/null; then
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+  else
+    echo "    (no /run/systemd/system → skipping daemon-reload, likely in chroot)"
+  fi
+  systemctl enable "$SERVICE_NAME"
+fi
 
 echo
 echo "==> done."
