@@ -65,31 +65,35 @@ jobs:
           df -h /
 
       - name: Set up QEMU binfmt for arm64 emulation
-        # The runner is x86_64 but pi-gen needs to run arm64 binaries in chroot
-        # (debootstrap second-stage, package configuration, our pip install).
-        # docker/setup-qemu-action handles all the binfmt_misc registration
-        # via a privileged Docker container — the de-facto standard pattern.
+        # docker/setup-qemu-action registers binfmt entries that point to
+        # qemu-*-static binaries (provided by qemu-user-static). This is the
+        # only reliable way to get F-flag binfmt entries on a GH Actions
+        # runner without systemd-binfmt cooperation.
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
       - name: Install pi-gen build dependencies
         run: |
-          # Full dep list from pi-gen's `depends` file. pi-gen's
-          # dependencies_check tests for each binary in PATH and prints the
-          # missing package name on failure.
           sudo apt-get update -qq
-          # qemu-user-binfmt provides /usr/bin/qemu-arm and qemu-aarch64
-          # binaries that pi-gen invokes by name. It also installs a dpkg
-          # trigger that registers binfmt entries (which docker/setup-qemu
-          # above also handles, so this is belt + suspenders).
+          # qemu-user-static provides the STATIC qemu binaries
+          # (qemu-aarch64-static, etc.) that debootstrap copies into the
+          # chroot. Pi-gen's depends_check looks for non-suffixed names
+          # (qemu-arm, qemu-aarch64) so we symlink below.
+          # qemu-user-binfmt conflicts with -static and is what pi-gen names
+          # in its error message, but the -static package is what we actually
+          # need — pi-gen's check just isn't picky about the package as long
+          # as the binary is in PATH.
           sudo apt-get install -y --no-install-recommends \
             quilt parted \
-            qemu-user-binfmt binfmt-support \
+            qemu-user-static binfmt-support \
             debootstrap zerofree zip dosfstools libarchive-tools \
             libcap2-bin grep rsync xz-utils file git curl bc \
             qemu-utils kpartx gpg pigz arch-test \
             coreutils psmisc kmod xxd e2fsprogs
+          # Symlink the un-suffixed names so pi-gen's depends_check passes.
+          sudo ln -sf /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64
+          sudo ln -sf /usr/bin/qemu-arm-static /usr/bin/qemu-arm
           # Verify binfmt registration is live.
           sudo update-binfmts --display qemu-aarch64 | head -5 || true
           cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>&1 | head -3 || true
