@@ -1,0 +1,79 @@
+name: Build Pi SD card image
+
+# Triggered on tag push (e.g. v0.2.0, v1.0.0-beta1).
+# Produces an artnet-htp-<tag>.img.xz file and attaches it to the GitHub Release
+# for the same tag (creating the release if it doesn't exist yet).
+#
+# This file is currently a skeleton — it produces a dummy artifact so we can
+# verify the tag → release pipeline end-to-end before plugging pi-gen in.
+# Step 4 of the build plan replaces the "build dummy artifact" step with a
+# real pi-gen invocation.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to attach assets to the Release
+
+jobs:
+  build:
+    name: Build image (${{ github.ref_name }})
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show context
+        run: |
+          echo "tag       : ${{ github.ref_name }}"
+          echo "sha       : ${{ github.sha }}"
+          echo "actor     : ${{ github.actor }}"
+          echo "event     : ${{ github.event_name }}"
+
+      - name: Free up disk (pi-gen will need ~15GB)
+        run: |
+          # We don't actually need this for the placeholder step, but doing
+          # it now matches what the real pi-gen step will need. Reclaims
+          # ~10GB of preinstalled toolchains we won't use.
+          sudo rm -rf /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h / | tail -1
+
+      - name: Build placeholder image
+        id: build
+        run: |
+          # PLACEHOLDER: real pi-gen build replaces this step in plan-step 4.
+          # For now we just emit a tiny .img.xz so the release-attachment flow
+          # is exercised end-to-end.
+          mkdir -p out
+          OUT="out/artnet-htp-${{ github.ref_name }}.img.xz"
+          printf 'placeholder image — replace with real pi-gen output in step 4\n' \
+            | xz -9 > "$OUT"
+          ls -lh out/
+          echo "asset_path=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Emit build-info.json (for future image baking)
+        run: |
+          cat > out/build-info.json <<EOF
+          {
+            "version": "${{ github.ref_name }}",
+            "git_sha": "${{ github.sha }}",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "image": "artnet-htp-${{ github.ref_name }}"
+          }
+          EOF
+          cat out/build-info.json
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            out/artnet-htp-${{ github.ref_name }}.img.xz
+            out/build-info.json
+          # Mark releases with a "-" suffix (e.g. v0.0.1-test) as prereleases
+          # so they don't show as the "Latest" on the repo page.
+          prerelease: ${{ contains(github.ref_name, '-') }}
