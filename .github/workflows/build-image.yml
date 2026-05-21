@@ -64,19 +64,22 @@ jobs:
           sudo apt-get clean
           df -h /
 
-      - name: Install qemu-user-static + binfmt
+      - name: Install pi-gen build dependencies
         run: |
+          # Full dep list from pi-gen's README + binfmt activation. pi-gen runs
+          # an internal `dependencies_check` that exits non-zero with a hint
+          # naming the specific package — keep this list complete.
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            qemu-user-static binfmt-support coreutils quilt parted \
-            qemu-utils dosfstools zip libcap2-bin grep rsync xz-utils \
-            file git curl bc psmisc gpg pigz arch-test
+            quilt parted \
+            qemu-user-static qemu-user-binfmt binfmt-support \
+            debootstrap zerofree zip dosfstools libarchive-tools \
+            libcap2-bin grep rsync xz-utils file git curl bc \
+            qemu-utils kpartx gpg pigz arch-test \
+            coreutils psmisc
           # Activate qemu-aarch64 in binfmt_misc so chroot can run arm64 bins.
           sudo update-binfmts --enable qemu-aarch64 || true
-          # Sanity check
-          docker run --rm --platform linux/arm64 -t \
-            arm64v8/debian:bookworm-slim true || \
-            echo "(docker arm64 probe not required; binfmt_misc is what we need)"
+          sudo update-binfmts --display qemu-aarch64 | head -5 || true
 
       - name: Clone pi-gen at pinned commit
         run: |
