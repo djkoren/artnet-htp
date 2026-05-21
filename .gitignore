@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.coverage
+.tox/
+htmlcov/
+*.egg-info/
+*.egg
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Local config (real IPs, deployment-specific)
+config.yaml
+config.loopback.yaml
+/tmp/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build output (pi-gen and any local image builds)
+/image/work/
+/image/deploy/
+*.img
+*.img.xz
+*.zip
+
+# Logs
+*.log

@@ -1,0 +1,53 @@
+# ArtNet HTP Merger — example configuration.
+# Copy to config.yaml and edit for your site.
+
+# Pi's static IP. Advertised in ArtPollReply so consoles see the right address.
+# Use 0.0.0.0 to bind to all interfaces (the bind IP advertised in ArtPollReply
+# will be inferred from the route to the configured outputs).
+bind_ip: 0.0.0.0
+
+# Output tick rate. DMX512 hardware is 44Hz; most consoles run 30-44Hz.
+# Range 10-60. Default 44.
+send_rate_hz: 44
+
+# Source is considered silent (contributes zeros to HTP) after this many seconds
+# without a packet. ArtNet spec is 2.5s. Lower = faster failover, more flicker
+# risk on lossy networks.
+source_timeout_s: 2.5
+
+# If true, the merger continues sending each configured universe even when no
+# source is alive (output goes to zeros). Keeps downstream nodes from timing
+# the merger out. If false, the merger goes silent until a source comes back.
+send_keepalive_when_silent: true
+
+# If true, unknown source IPs are auto-accepted into the allowlist on first
+# packet. If false (default, more secure), unknown sources are logged and
+# surfaced in the UI with a one-click "Allow" button.
+auto_allow_unknown_sources: false
+
+# Source allowlist. Only these IPs contribute to the HTP merge.
+sources:
+  - { ip: "192.168.1.10", label: "Console A" }
+  - { ip: "192.168.1.11", label: "Console B" }
+
+# Output destinations. Set broadcast: true to enable SO_BROADCAST for that IP
+# (needed for the 2.x.x.x or 10.x.x.x ArtNet broadcast conventions).
+outputs:
+  - { ip: "192.168.1.100", label: "Dimmer rack" }
+  - { ip: "192.168.1.101", label: "Moving lights" }
+
+# Universes to merge, as 15-bit port-addresses (0-32767).
+# Port-address = (net << 8) | (subnet << 4) | universe
+# Most "universe 1" in console UIs maps to port-address 0 or 1 depending on
+# the console's 0-based vs 1-based convention.
+universes: [0, 1, 2, 3]
+
+# Web UI / API.
+web:
+  host: 0.0.0.0
+  port: 8080
+
+# Node identity advertised in ArtPollReply.
+node:
+  short_name: "HTP Merger"
+  long_name: "ArtNet HTP Merger (Pi)"

@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ArtNet HTP Merger</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>ArtNet HTP Merger</h1>
+    <div class="header-right">
+      <span id="version-badge" class="version-badge" title="version">v…</span>
+      <div id="conn-pill" class="pill disconnected">disconnected</div>
+    </div>
+  </header>
+
+  <main>
+    <section id="settings-section">
+      <h2>Settings</h2>
+      <div class="row">
+        <label>Bind IP <input id="cfg-bind-ip" disabled></label>
+        <label>Send rate (Hz) <input id="cfg-send-rate" type="number" min="1" max="60" step="1"></label>
+        <label>Source timeout (s) <input id="cfg-source-timeout" type="number" min="0.1" max="60" step="0.1"></label>
+      </div>
+      <div class="row">
+        <label><input id="cfg-keepalive" type="checkbox"> Send zeros when all sources silent</label>
+        <label><input id="cfg-auto-allow" type="checkbox"> Auto-allow unknown sources</label>
+        <button id="save-settings">Save settings</button>
+      </div>
+      <div class="row stats">
+        <span>Malformed packets: <b id="stat-malformed">0</b></span>
+        <span>ArtPoll received: <b id="stat-artpoll">0</b></span>
+      </div>
+      <div class="row">
+        <button id="export-config" class="subtle" type="button">
+          Export config (YAML)
+        </button>
+        <label class="import-label">
+          <input id="import-config-file" type="file" accept=".yaml,.yml,application/x-yaml"
+                 style="display: none;">
+          <span id="import-config-btn" class="button-like" role="button" tabindex="0">
+            Import config…
+          </span>
+        </label>
+        <span class="muted hint" style="margin-left: auto;">
+          Drop <code>artnet-htp-config.yaml</code> on a fresh SD card's boot
+          partition to auto-load on first boot.
+        </span>
+      </div>
+      <div id="firstboot-error" class="firstboot-error" hidden>
+        <b>First-boot config error:</b> <span id="firstboot-error-text"></span>
+      </div>
+    </section>
+
+    <section id="unknown-section" hidden>
+      <h2>Unknown sources <span class="muted">(seen but not allowlisted)</span></h2>
+      <table id="unknown-table">
+        <thead><tr><th>IP</th><th>Packets</th><th>Last seen</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <section id="sources-section">
+      <h2>Sources</h2>
+      <table id="sources-table">
+        <thead>
+          <tr>
+            <th></th>
+            <th>IP</th>
+            <th>Label</th>
+            <th>Mode</th>
+            <th>Priority</th>
+            <th>Packets</th>
+            <th>Universes</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <form id="add-source-form" class="row">
+        <input name="ip" placeholder="192.168.1.10" required>
+        <input name="label" placeholder="Console A (label)">
+        <select name="mode" class="mode-select">
+          <option value="htp" selected>HTP</option>
+          <option value="priority">Priority</option>
+        </select>
+        <input name="priority" type="number" min="0" max="999" value="100"
+               class="prio-input" title="Higher number = wins. Default 100.">
+        <button type="submit">Add source</button>
+      </form>
+      <p class="muted hint">
+        <b>Mode</b> sets how each source contributes:
+        <b>HTP</b> sources merge channel-by-channel with each other (max wins).
+        <b>Priority</b> sources <b>override every HTP source</b> when they have any non-zero data
+        (e.g. set FPP to Priority so it takes over the rig when it&rsquo;s active, then falls back
+        to your HTP-merged Madrix when it goes to blackout).
+        Among multiple active Priority sources, the one with the
+        <b>highest Priority number wins</b> (200 beats 100).
+      </p>
+    </section>
+
+    <section id="outputs-section">
+      <h2>Outputs</h2>
+      <table id="outputs-table">
+        <thead>
+          <tr>
+            <th>IP</th>
+            <th>Port</th>
+            <th>Label</th>
+            <th>Broadcast</th>
+            <th>Packets sent</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <form id="add-output-form" class="row">
+        <input name="ip" placeholder="192.168.1.100" required>
+        <input name="port" type="number" min="1" max="65535" value="6454" class="port-input">
+        <input name="label" placeholder="Controller (label)">
+        <label><input name="broadcast" type="checkbox"> Broadcast</label>
+        <button type="submit">Add output</button>
+      </form>
+    </section>
+
+    <section id="universes-section">
+      <h2>Universes</h2>
+      <p class="muted hint">
+        Add the universe numbers your sources and receivers use. Use the number
+        your console / pixel mapper displays. For Net/Sub/Universe consoles, the
+        flat value is <code>(Net&times;256) + (Sub&times;16) + Universe</code>. Most setups
+        only need a handful of single-digit numbers.
+      </p>
+      <div id="universe-chips"></div>
+      <form id="add-universe-form" class="row">
+        <label>Universe <input name="port_address" type="number" min="0" max="32767" placeholder="0" required></label>
+        <button type="submit">Add universe</button>
+      </form>
+    </section>
+
+    <section id="preview-section">
+      <h2>Live preview</h2>
+      <div id="preview-list"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

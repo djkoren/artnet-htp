@@ -1,0 +1,39 @@
+[Unit]
+Description=ArtNet HTP Merger
+Documentation=https://art-net.org.uk/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=artnet
+Group=artnet
+WorkingDirectory=/opt/artnet-htp
+ExecStart=/opt/artnet-htp/.venv/bin/artnet-htp --config /etc/artnet-htp/config.yaml
+Restart=always
+RestartSec=2
+
+# Logs go to journald (view with: journalctl -u artnet-htp -f)
+StandardOutput=journal
+StandardError=journal
+
+# Lock-down (best-effort — we still need network and the binary)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/etc/artnet-htp /var/log/artnet-htp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=false  # uvicorn uses some JIT-ish things; keep this off
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+# UDP 6454 (ArtNet) and the configured web port must be reachable.
+# No CAP_NET_BIND needed — 6454 and 8080 are unprivileged.
+
+[Install]
+WantedBy=multi-user.target
