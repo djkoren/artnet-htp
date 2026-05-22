@@ -14,6 +14,25 @@
     version: null,             // {version, git_sha, built_at, image, last_firstboot_error}
   };
 
+  // ---- Toast notifications ----
+  // Stack of small notifications in the bottom-right corner. Auto-dismiss
+  // after `durationMs`. `kind` is "ok" | "warn" | "err" — drives the
+  // background color via CSS class.
+  function toast(message, { kind = "ok", durationMs = 2500 } = {}) {
+    const stack = document.getElementById("toast-stack");
+    if (!stack) return; // before-DOM-ready safety
+    const el = document.createElement("div");
+    el.className = `toast toast-${kind}`;
+    el.textContent = message;
+    stack.appendChild(el);
+    // Trigger CSS transition (next frame).
+    requestAnimationFrame(() => el.classList.add("show"));
+    setTimeout(() => {
+      el.classList.remove("show");
+      setTimeout(() => el.remove(), 300);
+    }, durationMs);
+  }
+
   // ---- Helpers ----
   // Parse a universe spec like "1-9", "0", "1,3,5-10" into a sorted, deduped
   // array of port_address ints. Throws Error with a human-readable message on
@@ -566,19 +585,21 @@
   function bindForms() {
     document.getElementById("save-settings").onclick = async () => {
       const cfg = structuredClone(state.config);
-      // Advertised IP (formerly bind_ip): blank = 0.0.0.0 = auto-detect.
-      // As of v0.2.5 this applies live — no restart needed. The receiver
-      // always listens on all interfaces regardless of this value.
+      // Advertised IP (lives under Advanced disclosure): blank = 0.0.0.0
+      // = auto-detect. As of v0.2.5 this applies live — no restart needed.
+      // The receiver always listens on all interfaces regardless of this
+      // value. (See the Advanced section copy for the full story.)
       cfg.bind_ip = document.getElementById("cfg-bind-ip").value.trim() || "0.0.0.0";
       cfg.send_rate_hz = parseFloat(document.getElementById("cfg-send-rate").value);
       cfg.source_timeout_s = parseFloat(document.getElementById("cfg-source-timeout").value);
       cfg.send_keepalive_when_silent = document.getElementById("cfg-keepalive").checked;
       cfg.auto_allow_unknown_sources = document.getElementById("cfg-auto-allow").checked;
-      await putConfig(cfg);
-      // The yellow restart banner used to pop here when bind_ip changed.
-      // We no longer need it — bind_ip is advertise-only and apply_config
-      // hot-applies it. The manual Restart button is still in the row for
-      // web.port changes or general "feels stuck" recovery.
+      try {
+        await putConfig(cfg);
+        toast("Settings saved");
+      } catch (err) {
+        toast("Save failed: " + err.message, { kind: "err", durationMs: 5000 });
+      }
     };
 
     const doRestart = async () => {
@@ -664,20 +685,48 @@
       await loadConfig();
     };
 
-    document.getElementById("add-universe-form").onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      const spec = String(fd.get("universes") || "").trim();
-      if (!spec) return;
-      let list;
-      try {
-        list = parseUniverseSpec(spec);
-      } catch (err) {
-        alert("Invalid universe input: " + err.message);
+    // Live preview of which universes will be added as the operator types.
+    const previewEl = document.getElementById("add-universe-preview");
+    const startEl = document.querySelector('#add-universe-form [name="start"]');
+    const countEl = document.querySelector('#add-universe-form [name="count"]');
+    function updateUniversePreview() {
+      const start = parseInt(startEl.value, 10);
+      const count = parseInt(countEl.value, 10);
+      if (Number.isNaN(start) || Number.isNaN(count) || count < 1) {
+        previewEl.textContent = "";
         return;
       }
-      if (list.length === 0) return;
-      if (list.length > 256 && !confirm(`Add ${list.length} universes?`)) return;
+      const end = start + count - 1;
+      if (end > 32767) {
+        previewEl.textContent = `→ would exceed max universe 32767`;
+        return;
+      }
+      previewEl.textContent = count === 1
+        ? `→ universe ${start}`
+        : `→ universes ${start}–${end}`;
+    }
+    startEl.addEventListener("input", updateUniversePreview);
+    countEl.addEventListener("input", updateUniversePreview);
+    updateUniversePreview();
+
+    document.getElementById("add-universe-form").onsubmit = async (e) => {
+      e.preventDefault();
+      const start = parseInt(startEl.value, 10);
+      const count = parseInt(countEl.value, 10);
+      if (Number.isNaN(start) || start < 0 || start > 32767) {
+        toast("Start must be 0–32767", { kind: "err" });
+        return;
+      }
+      if (Number.isNaN(count) || count < 1 || count > 4096) {
+        toast("Count must be 1–4096", { kind: "err" });
+        return;
+      }
+      if (start + count - 1 > 32767) {
+        toast(`Start ${start} + count ${count} exceeds max universe 32767`, { kind: "err", durationMs: 4000 });
+        return;
+      }
+      const list = [];
+      for (let i = 0; i < count; i++) list.push(start + i);
       let result;
       try {
         result = await api("/api/universes", {
@@ -685,13 +734,22 @@
           body: JSON.stringify({ port_addresses: list }),
         });
       } catch (err) {
-        alert("Failed to add: " + err.message);
+        toast("Failed to add: " + err.message, { kind: "err", durationMs: 5000 });
         return;
       }
-      if (result && result.skipped && result.skipped.length > 0) {
-        console.log(`Skipped already-present universes: ${result.skipped.join(", ")}`);
+      const added = (result && result.added) || [];
+      const skipped = (result && result.skipped) || [];
+      if (added.length === 0 && skipped.length > 0) {
+        toast(`Already had universe${skipped.length > 1 ? "s" : ""} ${skipped.join(", ")}`, { kind: "warn" });
+      } else if (skipped.length > 0) {
+        toast(`Added ${added.length}, skipped ${skipped.length} duplicate${skipped.length > 1 ? "s" : ""}`, { kind: "warn" });
+      } else {
+        toast(`Added ${added.length} universe${added.length > 1 ? "s" : ""}`);
       }
-      e.target.reset();
+      // Advance Start to the next slot so consecutive clicks keep walking.
+      startEl.value = String(start + count);
+      countEl.value = "1";
+      updateUniversePreview();
       await loadConfig();
     };
   }
