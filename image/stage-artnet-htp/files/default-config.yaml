@@ -12,7 +12,9 @@ auto_allow_unknown_sources: false
 
 sources: []
 outputs: []
-universes: []
+# v0.3.0+: universes live on each output (output.universes), not at the config
+# root. Empty outputs list = nothing tracked yet. Add an output via the web UI
+# and set its Start/End to start merging.
 
 web:
   host: 0.0.0.0

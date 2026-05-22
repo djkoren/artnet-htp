@@ -1,70 +1,101 @@
 "use strict";
 
+// v0.3.0: spreadsheet-style editor.
+//
+// All Source / Output / Settings inputs are bound to `state.draft` — a
+// client-side mutable copy of the last-saved config. Editing anything just
+// updates the draft. The Save button at the top PUTs the whole draft;
+// Discard reverts to the last-saved snapshot. A "N unsaved" pill in the
+// header counts the diff.
+//
+// Live snapshot data (status dot, packet count) is layered on TOP of the
+// editable rows via targeted DOM updates — we never tear the tbody down on
+// a snapshot tick, so the operator's typing focus / cursor stays put.
+
 (() => {
   const DMX_HEADER_LEN = 3;
   const DMX_CHANNELS = 512;
 
   const state = {
     ws: null,
-    config: null,
-    snapshot: null,
-    canvases: new Map(),       // port_address -> {canvas, ctx}
+    config: null,          // last server-saved config; never mutated
+    draft: null,           // editable copy; what Save sends
+    snapshot: null,        // runtime data
+    network: null,         // GET /api/network result
+    canvases: new Map(),
     watchedUniverses: new Set(),
-    editing: { source: null, output: null }, // ip currently being edited
-    version: null,             // {version, git_sha, built_at, image, last_firstboot_error}
+    version: null,
+    pendingNetworkTarget: null,  // {newIp, port} after Apply Network; UI polls
   };
 
-  // ---- Toast notifications ----
-  // Stack of small notifications in the bottom-right corner. Auto-dismiss
-  // after `durationMs`. `kind` is "ok" | "warn" | "err" — drives the
-  // background color via CSS class.
+  function cloneCfg(cfg) {
+    return cfg ? JSON.parse(JSON.stringify(cfg)) : null;
+  }
+
+  function dirtyKeys() {
+    if (!state.config || !state.draft) return [];
+    const keys = [];
+    if (JSON.stringify(state.config.sources || []) !== JSON.stringify(state.draft.sources || []))
+      keys.push("sources");
+    if (JSON.stringify(state.config.outputs || []) !== JSON.stringify(state.draft.outputs || []))
+      keys.push("outputs");
+    const settingsFields = ["bind_ip", "send_rate_hz", "source_timeout_s",
+                            "send_keepalive_when_silent", "auto_allow_unknown_sources"];
+    for (const f of settingsFields) {
+      if (state.config[f] !== state.draft[f]) { keys.push("settings"); break; }
+    }
+    return keys;
+  }
+
+  function updateDirtyPill() {
+    const pill = document.getElementById("dirty-pill");
+    const saveBtn = document.getElementById("save-all-btn");
+    const discardBtn = document.getElementById("discard-btn");
+    if (!pill || !saveBtn || !discardBtn) return;
+    const keys = dirtyKeys();
+    if (keys.length === 0) {
+      pill.hidden = true;
+      saveBtn.disabled = true;
+      discardBtn.disabled = true;
+      window.removeEventListener("beforeunload", _beforeUnloadGuard);
+    } else {
+      pill.hidden = false;
+      // "3 unsaved" or "1 unsaved" — the integer is the count of sub-areas
+      // that differ from saved, NOT the count of individual fields.
+      pill.textContent = `${keys.length} unsaved`;
+      pill.title = `Changes in: ${keys.join(", ")}`;
+      saveBtn.disabled = false;
+      discardBtn.disabled = false;
+      window.addEventListener("beforeunload", _beforeUnloadGuard);
+    }
+  }
+  function _beforeUnloadGuard(e) {
+    // Trigger the browser's "leave site?" confirm if the operator has
+    // unsaved edits. The custom message text is ignored on modern browsers,
+    // but returning a string is what flips the prompt on.
+    e.preventDefault();
+    e.returnValue = "Unsaved changes. Leave anyway?";
+    return e.returnValue;
+  }
+
+  // Called by input.onchange handlers anywhere in the page after mutating
+  // state.draft. Updates the dirty pill + save/discard buttons.
+  function markDirty() { updateDirtyPill(); }
+
+  // ---- Toast ----
   function toast(message, { kind = "ok", durationMs = 2500 } = {}) {
     const stack = document.getElementById("toast-stack");
-    if (!stack) return; // before-DOM-ready safety
+    if (!stack) return;
     const el = document.createElement("div");
     el.className = `toast toast-${kind}`;
     el.textContent = message;
     stack.appendChild(el);
-    // Trigger CSS transition (next frame).
     requestAnimationFrame(() => el.classList.add("show"));
     setTimeout(() => {
       el.classList.remove("show");
       setTimeout(() => el.remove(), 300);
     }, durationMs);
   }
-
-  // ---- Helpers ----
-  // Parse a universe spec like "1-9", "0", "1,3,5-10" into a sorted, deduped
-  // array of port_address ints. Throws Error with a human-readable message on
-  // malformed input. Caps individual range size at 4096 so a typo like "1-999999"
-  // can't lock the browser.
-  function parseUniverseSpec(spec) {
-    const out = new Set();
-    const parts = spec.split(",").map((s) => s.trim()).filter(Boolean);
-    if (parts.length === 0) throw new Error("empty");
-    for (const part of parts) {
-      const rangeMatch = part.match(/^(\d+)\s*-\s*(\d+)$/);
-      if (rangeMatch) {
-        const a = parseInt(rangeMatch[1], 10);
-        const b = parseInt(rangeMatch[2], 10);
-        if (a > b) throw new Error(`bad range "${part}" — start > end`);
-        if (b - a + 1 > 4096) throw new Error(`range "${part}" too large (max 4096)`);
-        for (let i = a; i <= b; i++) {
-          if (i > 32767) throw new Error(`universe ${i} out of range (max 32767)`);
-          out.add(i);
-        }
-      } else if (/^\d+$/.test(part)) {
-        const n = parseInt(part, 10);
-        if (n > 32767) throw new Error(`universe ${n} out of range (max 32767)`);
-        out.add(n);
-      } else {
-        throw new Error(`"${part}" isn't a number or a range like 1-9`);
-      }
-    }
-    return Array.from(out).sort((x, y) => x - y);
-  }
-  // Exposed for ad-hoc browser-console testing; harmless otherwise.
-  window.__parseUniverseSpec = parseUniverseSpec;
 
   // ---- API ----
   async function api(path, opts = {}) {
@@ -81,76 +112,65 @@
   }
   async function loadConfig() {
     state.config = await api("/api/config");
-    renderConfig();
-  }
-  async function putConfig(cfg) {
-    await api("/api/config", { method: "PUT", body: JSON.stringify(cfg) });
-    await loadConfig();
+    state.draft = cloneCfg(state.config);
+    renderEverything();
   }
   async function loadVersion() {
-    try {
-      state.version = await api("/api/version");
-    } catch (e) {
-      state.version = { version: "?", git_sha: null };
-    }
+    try { state.version = await api("/api/version"); }
+    catch (e) { state.version = { version: "?", git_sha: null }; }
     renderVersion();
+  }
+  async function loadNetwork() {
+    try { state.network = await api("/api/network"); }
+    catch (e) { state.network = { available: false, mode: "dhcp", error: String(e) }; }
+    renderNetwork();
   }
 
   function renderVersion() {
     const el = document.getElementById("version-badge");
     if (!el) return;
     const v = state.version || {};
-    const ver = v.version || "?";
-    // Strip any leading "v"/"V" so we don't end up rendering "vv0.2.6" when the
-    // baked version string is itself "v0.2.6" (tags are "v"-prefixed, but the
-    // python package version is bare). Always render exactly one "v".
-    const cleanVer = ver.replace(/^v+/i, "");
-    el.textContent = `v${cleanVer}`;
-    el.classList.toggle("dev", cleanVer.includes("dev") || cleanVer === "?");
-    const titleBits = [`version ${cleanVer}`];
+    const ver = (v.version || "?").replace(/^v+/i, "");
+    el.textContent = `v${ver}`;
+    el.classList.toggle("dev", ver.includes("dev") || ver === "?");
+    const titleBits = [`version ${ver}`];
     if (v.git_sha) titleBits.push(`git ${String(v.git_sha).slice(0, 7)}`);
     if (v.built_at) titleBits.push(`built ${v.built_at}`);
     if (v.image) titleBits.push(`image ${v.image}`);
     el.title = titleBits.join(" • ");
 
-    // First-boot error surfacing
-    const errBox = document.getElementById("firstboot-error");
-    const errText = document.getElementById("firstboot-error-text");
-    if (errBox && errText) {
-      if (v.last_firstboot_error) {
-        errText.textContent = v.last_firstboot_error;
-        errBox.hidden = false;
-      } else {
-        errBox.hidden = true;
-      }
+    const firstbootBanner = document.getElementById("firstboot-error");
+    const firstbootText = document.getElementById("firstboot-error-text");
+    if (v.last_firstboot_error) {
+      firstbootText.textContent = v.last_firstboot_error;
+      firstbootBanner.hidden = false;
+    } else {
+      firstbootBanner.hidden = true;
     }
   }
 
   // ---- WebSocket ----
   function connectWS() {
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${location.host}/ws/state`);
-    ws.binaryType = "arraybuffer";
-    state.ws = ws;
-    setConnectionPill(false);
-
-    ws.onopen = () => {
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const url = `${proto}//${window.location.host}/ws/state`;
+    state.ws = new WebSocket(url);
+    state.ws.binaryType = "arraybuffer";
+    state.ws.onopen = () => {
       setConnectionPill(true);
       for (const u of state.watchedUniverses) {
-        ws.send(JSON.stringify({ type: "watch", universe: u }));
+        state.ws.send(JSON.stringify({ type: "watch", universe: u }));
       }
     };
-    ws.onclose = () => {
+    state.ws.onclose = () => {
       setConnectionPill(false);
-      setTimeout(connectWS, 1000);
+      setTimeout(connectWS, 1500);
     };
-    ws.onerror = () => ws.close();
-    ws.onmessage = (ev) => {
+    state.ws.onmessage = (ev) => {
       if (typeof ev.data === "string") {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "status") {
+        if (msg.type === "snapshot") {
           state.snapshot = msg.data;
-          renderSnapshot();
+          renderSnapshotOverlay();
         }
       } else {
         handleDmxFrame(new Uint8Array(ev.data));
@@ -210,63 +230,24 @@
     state.canvases.clear();
   }
 
-  // ---- Render: config ----
-  function renderConfig() {
-    const cfg = state.config;
-    if (!cfg) return;
-    document.getElementById("cfg-bind-ip").value = cfg.bind_ip;
-    document.getElementById("cfg-send-rate").value = cfg.send_rate_hz;
-    document.getElementById("cfg-source-timeout").value = cfg.source_timeout_s;
-    document.getElementById("cfg-keepalive").checked = cfg.send_keepalive_when_silent;
-    document.getElementById("cfg-auto-allow").checked = cfg.auto_allow_unknown_sources;
-    renderUniverses();
-    renderPreviewList();
-    // Source/output tables now key off state.config (persisted, includes
-    // disabled rows) joined with state.snapshot (runtime data). After config
-    // loads we need to repaint them — otherwise a row you just disabled or
-    // added wouldn't reflect until the next WS tick.
-    if (state.snapshot) renderSnapshot();
-  }
-
-  function renderUniverses() {
-    const container = document.getElementById("universe-chips");
-    container.innerHTML = "";
-    if (!state.config) return;
-    if (state.config.universes.length === 0) {
-      container.innerHTML = '<span class="muted">No universes configured yet.</span>';
-      return;
-    }
-    for (const u of state.config.universes) {
-      const chip = document.createElement("span");
-      chip.className = "chip";
-      const net = (u >> 8) & 0x7F;
-      const sub = (u >> 4) & 0x0F;
-      const uni = u & 0x0F;
-      chip.title = `Net ${net} / Sub ${sub} / Universe ${uni}`;
-      chip.innerHTML = `<span>Universe <b>${u}</b></span><span class="breakdown">${net}/${sub}/${uni}</span>`;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.textContent = "×";
-      btn.title = "Remove universe";
-      btn.onclick = async () => {
-        await api(`/api/universes/${u}`, { method: "DELETE" });
-        await loadConfig();
-      };
-      chip.appendChild(btn);
-      container.appendChild(chip);
-    }
-  }
-
+  // ---- Live preview tiles ----
+  // The set of universes shown comes from snapshot.universes (the union of
+  // every enabled output's universes, computed server-side). We render tiles
+  // whenever that set changes.
   function renderPreviewList() {
     const container = document.getElementById("preview-list");
+    const universes = (state.snapshot?.universes || []).slice();
+    // Stable check: same set + same order → don't tear down canvases.
+    const currentKeys = Array.from(state.canvases.keys()).sort((a, b) => a - b).join(",");
+    const nextKeys = universes.slice().sort((a, b) => a - b).join(",");
+    if (currentKeys === nextKeys) return;
     clearCanvases();
     container.innerHTML = "";
-    if (!state.config) return;
-    if (state.config.universes.length === 0) {
-      container.innerHTML = '<span class="muted">Add a universe above to see live DMX preview.</span>';
+    if (universes.length === 0) {
+      container.innerHTML = '<span class="muted">Configure an output with a universe range to see live DMX preview.</span>';
       return;
     }
-    for (const u of state.config.universes) {
+    for (const u of universes) {
       const div = document.createElement("div");
       div.className = "universe-preview";
       const header = document.createElement("div");
@@ -284,355 +265,319 @@
     }
   }
 
-  // ---- Render: live snapshot ----
-  function renderSnapshot() {
+  // ---- Settings inputs → draft ----
+  function bindSettingsInputs() {
+    const bindings = [
+      ["cfg-send-rate", "send_rate_hz", (v) => parseFloat(v)],
+      ["cfg-source-timeout", "source_timeout_s", (v) => parseFloat(v)],
+      ["cfg-keepalive", "send_keepalive_when_silent", null],  // checkbox
+      ["cfg-auto-allow", "auto_allow_unknown_sources", null], // checkbox
+    ];
+    for (const [id, key, coerce] of bindings) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      const isCheckbox = el.type === "checkbox";
+      el.addEventListener("input", () => {
+        state.draft[key] = isCheckbox ? el.checked : (coerce ? coerce(el.value) : el.value);
+        markDirty();
+      });
+    }
+  }
+  function fillSettingsInputs() {
+    if (!state.draft) return;
+    document.getElementById("cfg-send-rate").value = state.draft.send_rate_hz;
+    document.getElementById("cfg-source-timeout").value = state.draft.source_timeout_s;
+    document.getElementById("cfg-keepalive").checked = !!state.draft.send_keepalive_when_silent;
+    document.getElementById("cfg-auto-allow").checked = !!state.draft.auto_allow_unknown_sources;
+  }
+
+  // ---- Sources table (always editable, draft-bound) ----
+  function renderSources() {
+    const tbody = document.querySelector("#sources-table tbody");
+    tbody.innerHTML = "";
+    if (!state.draft) return;
+    // Iterate draft.sources in array order — operator-controlled. No auto-sort
+    // here; would be visually disruptive while editing. The runtime sorts
+    // priority-first anyway when picking winners.
+    state.draft.sources.forEach((s, i) => {
+      tbody.appendChild(buildSourceRow(s, i));
+    });
+  }
+  function buildSourceRow(s, idx) {
+    const tr = document.createElement("tr");
+    tr.dataset.rowIndex = String(idx);
+    tr.dataset.kind = "source";
+    if (s.enabled === false) tr.classList.add("row-disabled");
+
+    // On toggle
+    const onTd = document.createElement("td");
+    onTd.className = "col-active";
+    const toggleLabel = document.createElement("label");
+    toggleLabel.className = "toggle";
+    const toggleInput = document.createElement("input");
+    toggleInput.type = "checkbox";
+    toggleInput.checked = s.enabled !== false;
+    toggleInput.addEventListener("change", () => {
+      state.draft.sources[idx].enabled = toggleInput.checked;
+      tr.classList.toggle("row-disabled", !toggleInput.checked);
+      markDirty();
+    });
+    const toggleTrack = document.createElement("span");
+    toggleTrack.className = "track";
+    toggleLabel.append(toggleInput, toggleTrack);
+    onTd.appendChild(toggleLabel);
+    tr.appendChild(onTd);
+
+    // Status dot (snapshot-driven)
+    const statusTd = document.createElement("td");
+    statusTd.className = "col-status";
+    statusTd.innerHTML = '<span class="dot" data-cell="dot"></span>';
+    tr.appendChild(statusTd);
+
+    // IP input
+    tr.appendChild(buildCellInput("col-ip", "text", s.ip, "192.168.1.10", (v) => {
+      state.draft.sources[idx].ip = v.trim();
+      markDirty();
+    }));
+
+    // Label input
+    tr.appendChild(buildCellInput("col-label", "text", s.label || "", "Console", (v) => {
+      state.draft.sources[idx].label = v;
+      markDirty();
+    }));
+
+    // Mode select
+    const modeTd = document.createElement("td");
+    modeTd.className = "col-mode";
+    const modeSelect = document.createElement("select");
+    modeSelect.className = "mode-select";
+    for (const m of ["htp", "priority"]) {
+      const opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = m === "htp" ? "HTP" : "Priority";
+      if ((s.mode || "htp") === m) opt.selected = true;
+      modeSelect.appendChild(opt);
+    }
+    modeSelect.addEventListener("change", () => {
+      state.draft.sources[idx].mode = modeSelect.value;
+      markDirty();
+    });
+    modeTd.appendChild(modeSelect);
+    tr.appendChild(modeTd);
+
+    // Priority input
+    tr.appendChild(buildCellInput("col-prio", "number", s.priority ?? 100, "100", (v) => {
+      state.draft.sources[idx].priority = parseInt(v, 10) || 100;
+      markDirty();
+    }, { min: 0, max: 999 }));
+
+    // Packets (snapshot-driven)
+    const pktTd = document.createElement("td");
+    pktTd.className = "col-packets";
+    pktTd.dataset.cell = "packets";
+    pktTd.textContent = "—";
+    tr.appendChild(pktTd);
+
+    // Actions: Delete
+    const actionsTd = document.createElement("td");
+    actionsTd.className = "col-actions row-actions";
+    const delBtn = document.createElement("button");
+    delBtn.className = "subtle";
+    delBtn.textContent = "Remove";
+    delBtn.addEventListener("click", () => {
+      const ip = state.draft.sources[idx].ip || "(new)";
+      if (!confirm(`Remove source ${ip}?`)) return;
+      state.draft.sources.splice(idx, 1);
+      renderSources();
+      markDirty();
+    });
+    actionsTd.appendChild(delBtn);
+    tr.appendChild(actionsTd);
+
+    return tr;
+  }
+
+  // ---- Outputs table (always editable, draft-bound) ----
+  function renderOutputs() {
+    const tbody = document.querySelector("#outputs-table tbody");
+    tbody.innerHTML = "";
+    if (!state.draft) return;
+    state.draft.outputs.forEach((o, i) => {
+      tbody.appendChild(buildOutputRow(o, i));
+    });
+  }
+  function buildOutputRow(o, idx) {
+    const tr = document.createElement("tr");
+    tr.dataset.rowIndex = String(idx);
+    tr.dataset.kind = "output";
+    if (o.enabled === false) tr.classList.add("row-disabled");
+
+    // On toggle
+    const onTd = document.createElement("td");
+    onTd.className = "col-active";
+    const toggleLabel = document.createElement("label");
+    toggleLabel.className = "toggle";
+    const toggleInput = document.createElement("input");
+    toggleInput.type = "checkbox";
+    toggleInput.checked = o.enabled !== false;
+    toggleInput.addEventListener("change", () => {
+      state.draft.outputs[idx].enabled = toggleInput.checked;
+      tr.classList.toggle("row-disabled", !toggleInput.checked);
+      markDirty();
+    });
+    const toggleTrack = document.createElement("span");
+    toggleTrack.className = "track";
+    toggleLabel.append(toggleInput, toggleTrack);
+    onTd.appendChild(toggleLabel);
+    tr.appendChild(onTd);
+
+    // IP input
+    tr.appendChild(buildCellInput("col-ip", "text", o.ip, "192.168.1.100", (v) => {
+      state.draft.outputs[idx].ip = v.trim();
+      markDirty();
+    }));
+
+    // Label input
+    tr.appendChild(buildCellInput("col-label", "text", o.label || "", "Controller", (v) => {
+      state.draft.outputs[idx].label = v;
+      markDirty();
+    }));
+
+    // Universe Start input. Universes are stored as an explicit list; the UI
+    // exposes Start + End, which we expand to a contiguous range on edit.
+    const univs = Array.isArray(o.universes) ? o.universes : [];
+    const start = univs.length ? Math.min(...univs) : 0;
+    const end = univs.length ? Math.max(...univs) : 0;
+    tr.appendChild(buildCellInput("col-univ-start", "number", start, "1", (v) => {
+      updateOutputUniverses(idx, parseInt(v, 10), null);
+      markDirty();
+    }, { min: 0, max: 32767 }));
+    tr.appendChild(buildCellInput("col-univ-end", "number", end, "1", (v) => {
+      updateOutputUniverses(idx, null, parseInt(v, 10));
+      markDirty();
+    }, { min: 0, max: 32767 }));
+
+    // Broadcast checkbox
+    const bcTd = document.createElement("td");
+    bcTd.className = "col-broadcast";
+    const bcLabel = document.createElement("label");
+    const bcInput = document.createElement("input");
+    bcInput.type = "checkbox";
+    bcInput.checked = !!o.broadcast;
+    bcInput.addEventListener("change", () => {
+      state.draft.outputs[idx].broadcast = bcInput.checked;
+      markDirty();
+    });
+    bcLabel.append(bcInput, document.createTextNode(" Broadcast"));
+    bcTd.appendChild(bcLabel);
+    tr.appendChild(bcTd);
+
+    // Packets (snapshot-driven)
+    const pktTd = document.createElement("td");
+    pktTd.className = "col-packets";
+    pktTd.dataset.cell = "packets";
+    pktTd.textContent = "—";
+    tr.appendChild(pktTd);
+
+    // Actions: Delete
+    const actionsTd = document.createElement("td");
+    actionsTd.className = "col-actions row-actions";
+    const delBtn = document.createElement("button");
+    delBtn.className = "subtle";
+    delBtn.textContent = "Remove";
+    delBtn.addEventListener("click", () => {
+      const ip = state.draft.outputs[idx].ip || "(new)";
+      if (!confirm(`Remove output ${ip}?`)) return;
+      state.draft.outputs.splice(idx, 1);
+      renderOutputs();
+      markDirty();
+    });
+    actionsTd.appendChild(delBtn);
+    tr.appendChild(actionsTd);
+
+    return tr;
+  }
+
+  // Recompute the universes list for an output when Start or End changes.
+  // Passing null for either side preserves the current min/max.
+  function updateOutputUniverses(idx, newStart, newEnd) {
+    const o = state.draft.outputs[idx];
+    const cur = Array.isArray(o.universes) ? o.universes : [];
+    const curStart = cur.length ? Math.min(...cur) : 0;
+    const curEnd = cur.length ? Math.max(...cur) : 0;
+    const s = newStart === null ? curStart : Math.max(0, Math.min(32767, newStart || 0));
+    const e = newEnd === null ? curEnd : Math.max(0, Math.min(32767, newEnd || 0));
+    if (e < s) {
+      // Don't refuse the typing — just let the list stay empty until the
+      // operator fixes End. UI shows the bad values but no universes get
+      // sent until valid.
+      o.universes = [];
+      return;
+    }
+    const range = [];
+    for (let u = s; u <= e; u++) range.push(u);
+    o.universes = range;
+  }
+
+  // Helper: an editable <td> with a single <input> inside, bound via onInput.
+  function buildCellInput(colClass, type, value, placeholder, onChange, extra = {}) {
+    const td = document.createElement("td");
+    td.className = colClass;
+    const inp = document.createElement("input");
+    inp.type = type;
+    inp.value = value ?? "";
+    if (placeholder) inp.placeholder = placeholder;
+    if (extra.min !== undefined) inp.min = String(extra.min);
+    if (extra.max !== undefined) inp.max = String(extra.max);
+    inp.addEventListener("input", () => onChange(inp.value));
+    td.appendChild(inp);
+    return td;
+  }
+
+  // ---- Snapshot overlay: update read-only cells without tearing down rows ----
+  function renderSnapshotOverlay() {
     const snap = state.snapshot;
     if (!snap) return;
     document.getElementById("stat-malformed").textContent = snap.malformed_count;
     document.getElementById("stat-artpoll").textContent = snap.artpoll_count;
-    // When a row is in edit mode (or "Add new" is open), DON'T tear the
-    // tbody down + rebuild it — the snapshot tick (every ~250ms) would
-    // replace the <input> the operator is typing into and the cursor
-    // would jump out mid-keystroke. v0.2.7 had this bug. Trade-off: live
-    // stats freeze in the table while editing. They resume on Save/Cancel.
-    if (state.editing.source === null) renderSources(snap.sources);
-    if (state.editing.output === null) renderOutputs(snap.outputs);
-    renderUnknown(snap.unknown_sources);
-  }
 
-  function renderSources(snapSources) {
-    const tbody = document.querySelector("#sources-table tbody");
-    tbody.innerHTML = "";
-
-    // We iterate the PERSISTED source list (state.config.sources) so disabled
-    // rows still show up — and join in runtime data from the snapshot by IP.
-    // Disabled sources are filtered out of the runtime in to_source_specs(),
-    // so they don't appear in snapSources at all.
-    const cfgSources = (state.config?.sources || []).slice();
-    const snapByIp = new Map();
-    for (const s of snapSources) snapByIp.set(s.ip, s);
-
-    // Priority first, then by priority DESC, then by IP. Disabled rows sink
-    // to the bottom so the operator's attention lands on live sources first.
-    cfgSources.sort((a, b) => {
-      const ea = a.enabled !== false, eb = b.enabled !== false;
-      if (ea !== eb) return ea ? -1 : 1;
-      const ma = a.mode === "priority" ? 0 : 1;
-      const mb = b.mode === "priority" ? 0 : 1;
-      if (ma !== mb) return ma - mb;
-      if ((a.priority ?? 100) !== (b.priority ?? 100))
-        return (b.priority ?? 100) - (a.priority ?? 100);
-      return a.ip.localeCompare(b.ip);
+    // Sources: match draft rows to snap entries by IP — for new/edited rows
+    // the IP may not match anything, so just leave their stats blank.
+    const sourceSnapByIp = new Map();
+    for (const s of (snap.sources || [])) sourceSnapByIp.set(s.ip, s);
+    document.querySelectorAll('#sources-table tbody tr').forEach(tr => {
+      const idx = parseInt(tr.dataset.rowIndex, 10);
+      const cfgIp = state.draft?.sources?.[idx]?.ip;
+      const s = cfgIp ? sourceSnapByIp.get(cfgIp) : null;
+      const dot = tr.querySelector('[data-cell="dot"]');
+      const pkts = tr.querySelector('[data-cell="packets"]');
+      const enabled = state.draft?.sources?.[idx]?.enabled !== false;
+      if (dot) {
+        dot.className = "dot";
+        if (!enabled) {
+          dot.title = "off";
+        } else if (s) {
+          if (s.alive) dot.classList.add("alive");
+          if (s.active) dot.classList.add("active");
+          dot.title = s.active ? "live" : (s.alive ? "blackout" : "silent");
+        }
+      }
+      if (pkts) pkts.textContent = s ? String(s.packet_count) : "—";
     });
 
-    if (state.editing.source === "__new__") {
-      const tr = document.createElement("tr");
-      renderSourceEditing(tr, { ip: "", label: "", mode: "htp", priority: 100, enabled: true, _isNew: true });
-      tbody.appendChild(tr);
-    }
-    for (const cfgEntry of cfgSources) {
-      const snapEntry = snapByIp.get(cfgEntry.ip);
-      // Build a unified row object: runtime data when enabled, stub data when
-      // disabled (so the renderer doesn't need to special-case).
-      const row = snapEntry || {
-        ip: cfgEntry.ip,
-        label: cfgEntry.label || cfgEntry.ip,
-        mode: cfgEntry.mode || "htp",
-        priority: cfgEntry.priority ?? 100,
-        alive: false,
-        active: false,
-        packet_count: 0,
-        universes: [],
-      };
-      const tr = document.createElement("tr");
-      tr.dataset.ip = cfgEntry.ip;
-      if (state.editing.source === cfgEntry.ip) {
-        renderSourceEditing(tr, row);
-      } else {
-        renderSourceRow(tr, row);
-      }
-      tbody.appendChild(tr);
-    }
-  }
-
-  // Toggle enabled flag on a source/output IP via a config PUT.
-  async function setSourceEnabled(ip, enabled) {
-    const cfg = structuredClone(state.config);
-    const s = cfg.sources.find(x => x.ip === ip);
-    if (!s) return;
-    s.enabled = enabled;
-    try {
-      await putConfig(cfg);
-      toast(`Source ${ip} ${enabled ? "enabled" : "disabled"}`);
-    } catch (e) {
-      toast(`Failed: ${e.message}`, { kind: "err" });
-    }
-  }
-  async function setOutputEnabled(ip, enabled) {
-    const cfg = structuredClone(state.config);
-    const o = cfg.outputs.find(x => x.ip === ip);
-    if (!o) return;
-    o.enabled = enabled;
-    try {
-      await putConfig(cfg);
-      toast(`Output ${ip} ${enabled ? "enabled" : "disabled"}`);
-    } catch (e) {
-      toast(`Failed: ${e.message}`, { kind: "err" });
-    }
-  }
-
-  function renderSourceRow(tr, s) {
-    // Look up the persisted `enabled` flag from state.config (snapshot doesn't
-    // carry it). Default true so legacy configs without the field stay on.
-    const cfgEntry = state.config?.sources?.find(x => x.ip === s.ip);
-    const enabled = cfgEntry ? cfgEntry.enabled !== false : true;
-    if (!enabled) tr.classList.add("row-disabled");
-
-    const universesDisplay = s.universes
-      .map(u => `${u.port_address}${u.active ? "" : (u.alive ? "·" : "*")}`)
-      .join(", ");
-    const dotClass = `dot${s.alive ? " alive" : ""}${s.active ? " active" : ""}`;
-    let badge = '';
-    if (!enabled) badge = '<span class="badge dead">off</span>';
-    else if (!s.alive) badge = '<span class="badge dead">silent</span>';
-    else if (!s.active) badge = '<span class="badge idle">blackout</span>';
-    else badge = '<span class="badge live">live</span>';
-    const mode = s.mode || "htp";
-    const modeBadge = mode === "priority"
-      ? '<span class="mode-badge prio">PRIORITY</span>'
-      : '<span class="mode-badge htp">HTP</span>';
-    const prioCell = mode === "priority"
-      ? `<b>${s.priority ?? 100}</b>`
-      : `<span class="muted">${s.priority ?? 100}</span>`;
-
-    tr.innerHTML = `
-      <td class="col-active"><label class="toggle"><input type="checkbox" ${enabled ? "checked" : ""}><span class="track"></span></label></td>
-      <td class="col-status"><span class="${dotClass}"></span></td>
-      <td class="col-ip"><code>${escapeHtml(s.ip)}</code> ${badge}</td>
-      <td class="col-label">${escapeHtml(s.label)}</td>
-      <td class="col-mode">${modeBadge}</td>
-      <td class="col-prio">${prioCell}</td>
-      <td class="col-packets">${s.packet_count}</td>
-      <td class="col-universes muted">${universesDisplay || "—"}</td>
-      <td class="col-actions row-actions"></td>
-    `;
-    tr.querySelector('input[type="checkbox"]').onchange = (e) => setSourceEnabled(s.ip, e.target.checked);
-    const actions = tr.lastElementChild;
-    const editBtn = document.createElement("button");
-    editBtn.className = "subtle";
-    editBtn.textContent = "Edit";
-    editBtn.onclick = () => { state.editing.source = s.ip; renderSnapshot(); };
-    const delBtn = document.createElement("button");
-    delBtn.className = "subtle";
-    delBtn.textContent = "Remove";
-    delBtn.onclick = async () => {
-      if (!confirm(`Remove source ${s.ip}?`)) return;
-      await api(`/api/sources/${s.ip}`, { method: "DELETE" });
-      await loadConfig();
-    };
-    actions.appendChild(editBtn);
-    actions.appendChild(delBtn);
-  }
-
-  function renderSourceEditing(tr, s) {
-    tr.classList.add("editing");
-    const mode = s.mode || "htp";
-    const isNew = s._isNew === true;
-    tr.innerHTML = `
-      <td class="col-active"></td>
-      <td class="col-status"></td>
-      <td class="col-ip"><input type="text" data-field="ip" value="${escapeAttr(s.ip)}" placeholder="192.168.1.10"></td>
-      <td class="col-label"><input type="text" data-field="label" value="${escapeAttr(s.label)}" placeholder="Console"></td>
-      <td class="col-mode">
-        <select data-field="mode" class="mode-select">
-          <option value="htp" ${mode === "htp" ? "selected" : ""}>HTP</option>
-          <option value="priority" ${mode === "priority" ? "selected" : ""}>Priority</option>
-        </select>
-      </td>
-      <td class="col-prio"><input type="number" min="0" max="999" data-field="priority" value="${s.priority ?? 100}" class="prio-input-edit"></td>
-      <td class="col-packets"></td>
-      <td class="col-universes"></td>
-      <td class="col-actions row-actions"></td>
-    `;
-    const ipInput = tr.querySelector('[data-field="ip"]');
-    if (isNew) ipInput.focus();
-    const actions = tr.lastElementChild;
-    const saveBtn = document.createElement("button");
-    saveBtn.textContent = "Save";
-    saveBtn.onclick = async () => {
-      const newIp = ipInput.value.trim();
-      if (!newIp) { toast("IP is required", { kind: "err" }); ipInput.focus(); return; }
-      const newLabel = tr.querySelector('[data-field="label"]').value;
-      const newMode = tr.querySelector('[data-field="mode"]').value;
-      const newPri = parseInt(tr.querySelector('[data-field="priority"]').value, 10) || 100;
-      const cfg = structuredClone(state.config);
-      if (isNew) {
-        if (cfg.sources.some(x => x.ip === newIp)) {
-          toast(`Source ${newIp} already exists`, { kind: "err" });
-          return;
-        }
-        cfg.sources.push({ ip: newIp, label: newLabel, mode: newMode, priority: newPri, enabled: true });
-      } else {
-        const idx = cfg.sources.findIndex(x => x.ip === s.ip);
-        if (idx === -1) return;
-        if (newIp !== s.ip && cfg.sources.some(x => x.ip === newIp)) {
-          toast(`Source ${newIp} already exists`, { kind: "err" });
-          return;
-        }
-        // Preserve enabled flag through edit.
-        cfg.sources[idx] = { ip: newIp, label: newLabel, mode: newMode, priority: newPri, enabled: cfg.sources[idx].enabled !== false };
-      }
-      state.editing.source = null;
-      try {
-        await putConfig(cfg);
-        toast(isNew ? `Source ${newIp} added` : "Source saved");
-      } catch (e) {
-        toast(`Save failed: ${e.message}`, { kind: "err" });
-        state.editing.source = isNew ? "__new__" : s.ip;
-        renderSnapshot();
-      }
-    };
-    const cancelBtn = document.createElement("button");
-    cancelBtn.className = "subtle";
-    cancelBtn.textContent = "Cancel";
-    cancelBtn.onclick = () => { state.editing.source = null; renderSnapshot(); };
-    actions.appendChild(saveBtn);
-    actions.appendChild(cancelBtn);
-  }
-
-  function renderOutputs(snapOutputs) {
-    const tbody = document.querySelector("#outputs-table tbody");
-    tbody.innerHTML = "";
-
-    // Same pattern as renderSources: iterate persisted config so disabled rows
-    // remain visible, join in runtime data from the snapshot.
-    const cfgOutputs = (state.config?.outputs || []).slice();
-    const snapByIp = new Map();
-    for (const o of snapOutputs) snapByIp.set(o.ip, o);
-
-    cfgOutputs.sort((a, b) => {
-      const ea = a.enabled !== false, eb = b.enabled !== false;
-      if (ea !== eb) return ea ? -1 : 1;
-      return a.ip.localeCompare(b.ip);
+    // Outputs: same pattern.
+    const outputSnapByIp = new Map();
+    for (const o of (snap.outputs || [])) outputSnapByIp.set(o.ip, o);
+    document.querySelectorAll('#outputs-table tbody tr').forEach(tr => {
+      const idx = parseInt(tr.dataset.rowIndex, 10);
+      const cfgIp = state.draft?.outputs?.[idx]?.ip;
+      const o = cfgIp ? outputSnapByIp.get(cfgIp) : null;
+      const pkts = tr.querySelector('[data-cell="packets"]');
+      if (pkts) pkts.textContent = o ? String(o.packet_count) : "—";
     });
 
-    if (state.editing.output === "__new__") {
-      const tr = document.createElement("tr");
-      renderOutputEditing(tr, { ip: "", label: "", broadcast: false, port: 6454, enabled: true, _isNew: true });
-      tbody.appendChild(tr);
-    }
-    for (const cfgEntry of cfgOutputs) {
-      const snapEntry = snapByIp.get(cfgEntry.ip);
-      const row = snapEntry || {
-        ip: cfgEntry.ip,
-        label: cfgEntry.label || cfgEntry.ip,
-        broadcast: !!cfgEntry.broadcast,
-        port: cfgEntry.port ?? 6454,
-        packet_count: 0,
-      };
-      const tr = document.createElement("tr");
-      tr.dataset.ip = cfgEntry.ip;
-      if (state.editing.output === cfgEntry.ip) {
-        renderOutputEditing(tr, row);
-      } else {
-        renderOutputRow(tr, row);
-      }
-      tbody.appendChild(tr);
-    }
-  }
-
-  function renderOutputRow(tr, o) {
-    const cfgEntry = state.config?.outputs?.find(x => x.ip === o.ip);
-    const enabled = cfgEntry ? cfgEntry.enabled !== false : true;
-    if (!enabled) tr.classList.add("row-disabled");
-
-    tr.innerHTML = `
-      <td class="col-active"><label class="toggle"><input type="checkbox" ${enabled ? "checked" : ""}><span class="track"></span></label></td>
-      <td class="col-ip"><code>${escapeHtml(o.ip)}</code></td>
-      <td class="col-label">${escapeHtml(o.label)}</td>
-      <td class="col-broadcast">${o.broadcast ? "✓" : ""}</td>
-      <td class="col-packets">${o.packet_count}</td>
-      <td class="col-actions row-actions"></td>
-    `;
-    tr.querySelector('input[type="checkbox"]').onchange = (e) => setOutputEnabled(o.ip, e.target.checked);
-    const actions = tr.lastElementChild;
-    const editBtn = document.createElement("button");
-    editBtn.className = "subtle";
-    editBtn.textContent = "Edit";
-    editBtn.onclick = () => { state.editing.output = o.ip; renderSnapshot(); };
-    const delBtn = document.createElement("button");
-    delBtn.className = "subtle";
-    delBtn.textContent = "Remove";
-    delBtn.onclick = async () => {
-      if (!confirm(`Remove output ${o.ip}?`)) return;
-      await api(`/api/outputs/${o.ip}`, { method: "DELETE" });
-      await loadConfig();
-    };
-    actions.appendChild(editBtn);
-    actions.appendChild(delBtn);
-  }
-
-  function renderOutputEditing(tr, o) {
-    tr.classList.add("editing");
-    const isNew = o._isNew === true;
-    // Port stays in the schema (6454 by default) but isn't surfaced — ArtNet
-    // is always UDP 6454 in the field; exposing the input was just visual noise.
-    tr.innerHTML = `
-      <td class="col-active"></td>
-      <td class="col-ip"><input type="text" data-field="ip" value="${escapeAttr(o.ip)}" placeholder="192.168.1.100"></td>
-      <td class="col-label"><input type="text" data-field="label" value="${escapeAttr(o.label)}" placeholder="Controller"></td>
-      <td class="col-broadcast"><label><input type="checkbox" data-field="broadcast" ${o.broadcast ? "checked" : ""}> Broadcast</label></td>
-      <td class="col-packets"></td>
-      <td class="col-actions row-actions"></td>
-    `;
-    const ipInput = tr.querySelector('[data-field="ip"]');
-    if (isNew) ipInput.focus();
-    const actions = tr.lastElementChild;
-    const saveBtn = document.createElement("button");
-    saveBtn.textContent = "Save";
-    saveBtn.onclick = async () => {
-      const newIp = ipInput.value.trim();
-      if (!newIp) { toast("IP is required", { kind: "err" }); ipInput.focus(); return; }
-      const newLabel = tr.querySelector('[data-field="label"]').value;
-      const newBroadcast = tr.querySelector('[data-field="broadcast"]').checked;
-      const cfg = structuredClone(state.config);
-      if (isNew) {
-        if (cfg.outputs.some(x => x.ip === newIp)) {
-          toast(`Output ${newIp} already exists`, { kind: "err" });
-          return;
-        }
-        cfg.outputs.push({ ip: newIp, port: 6454, label: newLabel, broadcast: newBroadcast, enabled: true });
-      } else {
-        const idx = cfg.outputs.findIndex(x => x.ip === o.ip);
-        if (idx === -1) return;
-        if (newIp !== o.ip && cfg.outputs.some(x => x.ip === newIp)) {
-          toast(`Output ${newIp} already exists`, { kind: "err" });
-          return;
-        }
-        cfg.outputs[idx] = {
-          ip: newIp,
-          port: cfg.outputs[idx].port ?? 6454,
-          label: newLabel,
-          broadcast: newBroadcast,
-          enabled: cfg.outputs[idx].enabled !== false,
-        };
-      }
-      state.editing.output = null;
-      try {
-        await putConfig(cfg);
-        toast(isNew ? `Output ${newIp} added` : "Output saved");
-      } catch (e) {
-        toast(`Save failed: ${e.message}`, { kind: "err" });
-        state.editing.output = isNew ? "__new__" : o.ip;
-        renderSnapshot();
-      }
-    };
-    const cancelBtn = document.createElement("button");
-    cancelBtn.className = "subtle";
-    cancelBtn.textContent = "Cancel";
-    cancelBtn.onclick = () => { state.editing.output = null; renderSnapshot(); };
-    actions.appendChild(saveBtn);
-    actions.appendChild(cancelBtn);
+    renderUnknown(snap.unknown_sources || []);
+    renderPreviewList();
   }
 
   function renderUnknown(unknown) {
@@ -653,26 +598,164 @@
         <td></td>
       `;
       const btn = document.createElement("button");
-      btn.textContent = "Allow";
-      btn.onclick = async () => {
-        await api("/api/sources/allow", {
-          method: "POST",
-          body: JSON.stringify({ ip: u.ip, label: "" }),
-        });
-        await loadConfig();
-      };
+      btn.textContent = "Add as source";
+      btn.title = "Adds to the draft. Click Save changes above to commit.";
+      btn.addEventListener("click", () => {
+        const ip = u.ip;
+        if (!state.draft.sources.some(x => x.ip === ip)) {
+          state.draft.sources.push({ ip, label: "", mode: "htp", priority: 100, enabled: true });
+          renderSources();
+          markDirty();
+          toast(`Added ${ip} to sources — click Save changes`, { kind: "warn" });
+        }
+      });
       tr.lastElementChild.appendChild(btn);
       tbody.appendChild(tr);
     }
   }
 
+  // ---- Network section ----
+  function renderNetwork() {
+    if (!state.network) return;
+    const mode = state.network.mode || "dhcp";
+    document.getElementById("net-mode-dhcp").checked = mode === "dhcp";
+    document.getElementById("net-mode-static").checked = mode === "static";
+    document.getElementById("net-static-fields").hidden = mode !== "static";
+    document.getElementById("net-ip").value = state.network.ip || "";
+    document.getElementById("net-prefix").value = state.network.prefix || 24;
+    document.getElementById("net-gw").value = state.network.gateway || "";
+    document.getElementById("net-dns").value = state.network.dns || "";
+
+    const hint = document.getElementById("net-current");
+    if (!state.network.available) {
+      hint.textContent = "(running off a system without nmcli — dev mode)";
+    } else if (state.network.error) {
+      hint.textContent = `(nmcli reported: ${state.network.error})`;
+    } else {
+      hint.textContent = "";
+    }
+  }
+  function bindNetworkInputs() {
+    for (const id of ["net-mode-dhcp", "net-mode-static"]) {
+      const el = document.getElementById(id);
+      el.addEventListener("change", () => {
+        const isStatic = document.getElementById("net-mode-static").checked;
+        document.getElementById("net-static-fields").hidden = !isStatic;
+      });
+    }
+    document.getElementById("net-apply-btn").addEventListener("click", async () => {
+      const isStatic = document.getElementById("net-mode-static").checked;
+      const body = isStatic
+        ? {
+            mode: "static",
+            ip: document.getElementById("net-ip").value.trim(),
+            prefix: parseInt(document.getElementById("net-prefix").value, 10) || 24,
+            gateway: document.getElementById("net-gw").value.trim(),
+            dns: document.getElementById("net-dns").value.trim(),
+          }
+        : { mode: "dhcp" };
+      try {
+        await api("/api/network", { method: "POST", body: JSON.stringify(body) });
+      } catch (e) {
+        toast(`Network apply failed: ${e.message}`, { kind: "err", durationMs: 6000 });
+        return;
+      }
+      toast("Network settings saved. Reboot the Pi to apply.", { durationMs: 5000 });
+      document.getElementById("net-banner").hidden = false;
+      if (isStatic && body.ip) {
+        state.pendingNetworkTarget = { newIp: body.ip, port: window.location.port || "80" };
+      } else {
+        state.pendingNetworkTarget = null;
+      }
+    });
+    document.getElementById("net-reboot-btn").addEventListener("click", async () => {
+      if (!confirm("Reboot the Pi now? The UI will reconnect when it comes back.")) return;
+      try {
+        await api("/api/network/reboot", { method: "POST" });
+      } catch (e) {
+        // The server might close the socket before responding — that's OK.
+      }
+      toast("Rebooting… waiting for the Pi to come back.", { durationMs: 8000 });
+      pollForReboot();
+    });
+  }
+  async function pollForReboot() {
+    // The Pi may come back on a new IP if the operator changed Static IP, or
+    // the same IP otherwise. Poll BOTH the current URL and the pending new
+    // IP (if any). First to respond wins.
+    const target = state.pendingNetworkTarget;
+    const newUrl = target
+      ? `${window.location.protocol}//${target.newIp}${target.port && target.port !== "80" ? ":" + target.port : ""}/`
+      : null;
+    const start = Date.now();
+    while (Date.now() - start < 180000) {  // 3 min budget
+      await new Promise(r => setTimeout(r, 3000));
+      // Same IP
+      try {
+        const r = await fetch("/api/state", { cache: "no-store" });
+        if (r.ok) {
+          if (newUrl && newUrl !== window.location.href) {
+            window.location.href = newUrl;
+          } else {
+            window.location.reload();
+          }
+          return;
+        }
+      } catch (_e) {}
+      // New IP (CORS may block this, so we use no-cors; we just need the
+      // browser to know "something answered"). Best-effort.
+      if (newUrl) {
+        try {
+          await fetch(newUrl, { mode: "no-cors", cache: "no-store" });
+          // If the fetch resolved (didn't throw) the server is up. Redirect.
+          window.location.href = newUrl;
+          return;
+        } catch (_e) {}
+      }
+    }
+    toast("Pi didn't come back within 3 min. Check power + network + console.", { kind: "err", durationMs: 15000 });
+  }
+
+  // ---- Render everything ----
+  function renderEverything() {
+    fillSettingsInputs();
+    renderSources();
+    renderOutputs();
+    renderPreviewList();
+    updateDirtyPill();
+  }
+
+  // ---- Save / Discard ----
+  async function saveAll() {
+    if (!state.draft) return;
+    const btn = document.getElementById("save-all-btn");
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    try {
+      await api("/api/config", { method: "PUT", body: JSON.stringify(state.draft) });
+      state.config = cloneCfg(state.draft);
+      toast("Saved");
+      updateDirtyPill();
+    } catch (e) {
+      toast(`Save failed: ${e.message}`, { kind: "err", durationMs: 6000 });
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Save changes";
+    }
+  }
+  function discardAll() {
+    if (dirtyKeys().length === 0) return;
+    if (!confirm("Discard all unsaved changes?")) return;
+    state.draft = cloneCfg(state.config);
+    renderEverything();
+    toast("Reverted");
+  }
+
+  // ---- Misc helpers ----
   function escapeHtml(s) {
     return String(s || "").replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     }[c]));
-  }
-  function escapeAttr(s) {
-    return String(s || "").replace(/"/g, "&quot;");
   }
   function formatAge(s) {
     if (s == null) return "—";
@@ -681,16 +764,10 @@
     return `${(s / 3600).toFixed(1)}h ago`;
   }
 
-  // ---- Config Export / Import ----
+  // ---- Config export / import ----
   function bindConfigIO() {
     const exportBtn = document.getElementById("export-config");
-    if (exportBtn) {
-      exportBtn.onclick = () => {
-        // Direct download — server sets Content-Disposition so the browser
-        // saves it instead of rendering it as text.
-        window.location.href = "/api/config/export";
-      };
-    }
+    if (exportBtn) exportBtn.onclick = () => { window.location.href = "/api/config/export"; };
 
     const fileInput = document.getElementById("import-config-file");
     const importBtn = document.getElementById("import-config-btn");
@@ -703,72 +780,73 @@
       fileInput.onchange = async () => {
         const f = fileInput.files && fileInput.files[0];
         if (!f) return;
+        if (dirtyKeys().length > 0 &&
+            !confirm("You have unsaved changes. Importing will overwrite them. Continue?")) {
+          fileInput.value = ""; return;
+        }
         const text = await f.text();
         try {
           const res = await fetch("/api/config/import", {
-            method: "POST",
-            headers: { "Content-Type": "application/x-yaml" },
-            body: text,
+            method: "POST", headers: { "Content-Type": "application/x-yaml" }, body: text,
           });
           if (!res.ok) {
             const err = await res.text();
-            alert(`Import failed (HTTP ${res.status}):\n${err}`);
+            toast(`Import failed: ${err}`, { kind: "err", durationMs: 8000 });
           } else {
             await loadConfig();
             await loadVersion();
-            alert(`Imported ${f.name}. New config is live.`);
+            toast(`Imported ${f.name}`);
           }
         } catch (e) {
-          alert(`Import failed: ${e.message}`);
+          toast(`Import failed: ${e.message}`, { kind: "err", durationMs: 8000 });
         }
-        // Reset input so selecting the same file again still fires `change`.
         fileInput.value = "";
       };
     }
   }
 
-  // ---- Forms ----
-  function bindForms() {
-    document.getElementById("save-settings").onclick = async () => {
-      const cfg = structuredClone(state.config);
-      // Advertised IP (lives under Advanced disclosure): blank = 0.0.0.0
-      // = auto-detect. As of v0.2.5 this applies live — no restart needed.
-      // The receiver always listens on all interfaces regardless of this
-      // value. (See the Advanced section copy for the full story.)
-      cfg.bind_ip = document.getElementById("cfg-bind-ip").value.trim() || "0.0.0.0";
-      cfg.send_rate_hz = parseFloat(document.getElementById("cfg-send-rate").value);
-      cfg.source_timeout_s = parseFloat(document.getElementById("cfg-source-timeout").value);
-      cfg.send_keepalive_when_silent = document.getElementById("cfg-keepalive").checked;
-      cfg.auto_allow_unknown_sources = document.getElementById("cfg-auto-allow").checked;
-      try {
-        await putConfig(cfg);
-        toast("Settings saved");
-      } catch (err) {
-        toast("Save failed: " + err.message, { kind: "err", durationMs: 5000 });
-      }
-    };
+  // ---- Boot wiring ----
+  function bindGlobalButtons() {
+    document.getElementById("save-all-btn").addEventListener("click", saveAll);
+    document.getElementById("discard-btn").addEventListener("click", discardAll);
 
-    const doRestart = async () => {
+    document.getElementById("add-source-btn").addEventListener("click", () => {
+      state.draft.sources.push({ ip: "", label: "", mode: "htp", priority: 100, enabled: true });
+      renderSources();
+      markDirty();
+      // Focus the IP input of the row we just appended.
+      const rows = document.querySelectorAll("#sources-table tbody tr");
+      const last = rows[rows.length - 1];
+      last?.querySelector(".col-ip input")?.focus();
+    });
+
+    document.getElementById("add-output-btn").addEventListener("click", () => {
+      state.draft.outputs.push({
+        ip: "", label: "", broadcast: false, port: 6454,
+        enabled: true, universes: [],
+      });
+      renderOutputs();
+      markDirty();
+      const rows = document.querySelectorAll("#outputs-table tbody tr");
+      const last = rows[rows.length - 1];
+      last?.querySelector(".col-ip input")?.focus();
+    });
+
+    document.getElementById("restart-service").addEventListener("click", async () => {
       if (!confirm("Restart the merger? The UI will reconnect in a few seconds.")) return;
-      try {
-        await api("/api/restart", { method: "POST" });
-      } catch (e) {
-        // The server may close the socket before responding; that's normal.
-      }
-      // Poll /api/state until it answers again, then reload.
+      try { await api("/api/restart", { method: "POST" }); } catch (_e) {}
       const start = Date.now();
       while (Date.now() - start < 30000) {
-        await new Promise((r) => setTimeout(r, 1500));
+        await new Promise(r => setTimeout(r, 1500));
         try {
           const r = await fetch("/api/state");
           if (r.ok) { window.location.reload(); return; }
-        } catch (_e) { /* still down */ }
+        } catch (_e) {}
       }
-      alert("Service didn't come back within 30 seconds. SSH in and check `journalctl -u artnet-htp`.");
-    };
-    document.getElementById("restart-service").onclick = doRestart;
+      toast("Service didn't come back within 30s. Check journalctl.", { kind: "err", durationMs: 10000 });
+    });
 
-    document.getElementById("check-updates-btn").onclick = async () => {
+    document.getElementById("check-updates-btn").addEventListener("click", async () => {
       const btn = document.getElementById("check-updates-btn");
       const badge = document.getElementById("update-badge");
       const installBtn = document.getElementById("install-update-btn");
@@ -778,9 +856,7 @@
       badge.hidden = true;
       installBtn.hidden = true;
       try {
-        const r = await fetch("/api/update/status");
-        if (!r.ok) throw new Error("status " + r.status);
-        const j = await r.json();
+        const j = await api("/api/update/status");
         if (j.update_available) {
           badge.textContent = `${j.latest} available`;
           badge.href = j.release_url || "https://github.com/djkoren/artnet-htp/releases";
@@ -804,26 +880,23 @@
         btn.disabled = false;
         setTimeout(() => { btn.textContent = orig; btn.title = "Check GitHub for a newer release"; }, 6000);
       }
-    };
+    });
 
-    document.getElementById("install-update-btn").onclick = async () => {
+    document.getElementById("install-update-btn").addEventListener("click", async () => {
       const btn = document.getElementById("install-update-btn");
       const tag = btn.dataset.tag || "latest";
-      if (!confirm(`Install ${tag}? The merger will download, install, and restart. UI reconnects in ~30s.`)) return;
+      if (!confirm(`Install ${tag}? Pi will download + install + restart. UI reconnects in ~30s.`)) return;
       btn.disabled = true;
-      const orig = btn.textContent;
       btn.textContent = "Installing…";
-      toast(`Installing ${tag}… download + install + restart`, { durationMs: 8000 });
+      toast(`Installing ${tag}…`, { durationMs: 8000 });
       try {
         await api("/api/update/install", { method: "POST" });
       } catch (e) {
         toast(`Install failed: ${e.message}`, { kind: "err", durationMs: 10000 });
         btn.disabled = false;
-        btn.textContent = orig;
+        btn.textContent = `Install ${tag}`;
         return;
       }
-      // The server is exiting; the next /api/state call will fail until
-      // systemd brings us back. Poll until it answers, then reload.
       const start = Date.now();
       while (Date.now() - start < 90000) {
         await new Promise(r => setTimeout(r, 2000));
@@ -832,124 +905,25 @@
           if (r.ok) { window.location.reload(); return; }
         } catch (_e) {}
       }
-      toast("Service didn't come back within 90s. SSH in and check journalctl.", { kind: "err", durationMs: 15000 });
+      toast("Service didn't come back within 90s.", { kind: "err", durationMs: 15000 });
       btn.disabled = false;
-      btn.textContent = orig;
-    };
-
-    // "Add source/output" buttons open a blank editing row inline at the top
-    // of their respective tables. The Save handler in renderSourceEditing /
-    // renderOutputEditing performs the actual POST, with validation +
-    // toast feedback. Cancelling the row removes it.
-    document.getElementById("add-source-btn").onclick = () => {
-      if (state.editing.source) return; // already editing something
-      state.editing.source = "__new__";
-      renderSnapshot();
-    };
-    document.getElementById("add-output-btn").onclick = () => {
-      if (state.editing.output) return;
-      state.editing.output = "__new__";
-      renderSnapshot();
-    };
-
-    // Live preview of which universes will be added as the operator types.
-    const previewEl = document.getElementById("add-universe-preview");
-    const startEl = document.querySelector('#add-universe-form [name="start"]');
-    const endEl = document.querySelector('#add-universe-form [name="end"]');
-    // Keep End ≥ Start as Start moves up — feels natural when filling in.
-    startEl.addEventListener("input", () => {
-      const s = parseInt(startEl.value, 10);
-      const e = parseInt(endEl.value, 10);
-      if (!Number.isNaN(s) && (Number.isNaN(e) || e < s)) endEl.value = String(s);
-      updateUniversePreview();
+      btn.textContent = `Install ${tag}`;
     });
-    endEl.addEventListener("input", updateUniversePreview);
-    function updateUniversePreview() {
-      const start = parseInt(startEl.value, 10);
-      const end = parseInt(endEl.value, 10);
-      if (Number.isNaN(start) || Number.isNaN(end)) {
-        previewEl.textContent = "";
-        return;
-      }
-      if (end < start) {
-        previewEl.textContent = "→ end must be ≥ start";
-        return;
-      }
-      if (end > 32767) {
-        previewEl.textContent = "→ end must be ≤ 32767";
-        return;
-      }
-      const count = end - start + 1;
-      previewEl.textContent = count === 1
-        ? `→ universe ${start}`
-        : `→ universes ${start}–${end} (${count} total)`;
-    }
-    updateUniversePreview();
-
-    document.getElementById("add-universe-form").onsubmit = async (e) => {
-      e.preventDefault();
-      const start = parseInt(startEl.value, 10);
-      const end = parseInt(endEl.value, 10);
-      if (Number.isNaN(start) || start < 0 || start > 32767) {
-        toast("Start must be 0–32767", { kind: "err" });
-        return;
-      }
-      if (Number.isNaN(end) || end < start) {
-        toast("End must be ≥ Start", { kind: "err" });
-        return;
-      }
-      if (end > 32767) {
-        toast("End must be ≤ 32767", { kind: "err" });
-        return;
-      }
-      const count = end - start + 1;
-      if (count > 4096) {
-        toast("Range too large (max 4096)", { kind: "err" });
-        return;
-      }
-      const list = [];
-      for (let i = 0; i < count; i++) list.push(start + i);
-      let result;
-      try {
-        result = await api("/api/universes", {
-          method: "POST",
-          body: JSON.stringify({ port_addresses: list }),
-        });
-      } catch (err) {
-        toast("Failed to add: " + err.message, { kind: "err", durationMs: 5000 });
-        return;
-      }
-      const added = (result && result.added) || [];
-      const skipped = (result && result.skipped) || [];
-      if (added.length === 0 && skipped.length > 0) {
-        toast(`Already had universe${skipped.length > 1 ? "s" : ""} ${skipped.join(", ")}`, { kind: "warn" });
-      } else if (skipped.length > 0) {
-        toast(`Added ${added.length}, skipped ${skipped.length} duplicate${skipped.length > 1 ? "s" : ""}`, { kind: "warn" });
-      } else {
-        toast(`Added ${added.length} universe${added.length > 1 ? "s" : ""}`);
-      }
-      // Advance Start past the range just added; bump End to match so the
-      // next click adds one more universe by default — operators usually
-      // walk forward universe-by-universe when filling in.
-      startEl.value = String(end + 1);
-      endEl.value = String(end + 1);
-      updateUniversePreview();
-      await loadConfig();
-    };
   }
 
-  // ---- Boot ----
   async function boot() {
-    bindForms();
+    bindGlobalButtons();
+    bindSettingsInputs();
+    bindNetworkInputs();
     bindConfigIO();
     await loadVersion();
-    // Refresh version periodically so a firstboot error that just appeared
-    // (or got cleared) is reflected in the UI without a page reload.
     setInterval(loadVersion, 30_000);
     try {
       await loadConfig();
+      await loadNetwork();
     } catch (e) {
-      console.error("Failed to load config:", e);
+      console.error("boot failed:", e);
+      toast("Failed to load config — check console.", { kind: "err", durationMs: 8000 });
     }
     connectWS();
   }

@@ -17,11 +17,15 @@
       <button id="install-update-btn" class="install-update-btn" type="button" hidden></button>
       <button id="check-updates-btn" class="check-updates-btn" type="button"
               title="Check GitHub for a newer release">Check for updates</button>
+      <span id="dirty-pill" class="dirty-pill" hidden>0 unsaved</span>
+      <button id="save-all-btn" type="button" disabled>Save changes</button>
+      <button id="discard-btn" class="subtle" type="button" disabled>Discard</button>
       <div id="conn-pill" class="pill disconnected">disconnected</div>
     </div>
   </header>
 
   <main>
+    <!-- ------- Settings ------- -->
     <section id="settings-section">
       <h2>Settings</h2>
       <div class="row">
@@ -31,24 +35,10 @@
       <div class="row">
         <label><input id="cfg-keepalive" type="checkbox"> Send zeros when all sources silent</label>
         <label><input id="cfg-auto-allow" type="checkbox"> Auto-allow unknown sources</label>
-        <button id="save-settings">Save settings</button>
-        <button id="restart-service" class="subtle" type="button" title="Restart the merger process. Rarely needed — most settings apply live.">
+        <button id="restart-service" class="subtle" type="button" title="Restart the merger process. Rarely needed.">
           Restart service
         </button>
       </div>
-      <details class="advanced">
-        <summary>Advanced</summary>
-        <div class="row">
-          <label>Advertised IP
-            <input id="cfg-bind-ip" placeholder="0.0.0.0">
-            <span class="muted hint">
-              IP echoed back in ArtPoll discovery. <code>0.0.0.0</code> = auto-detect.
-              Does not change the Pi's actual IP — set a DHCP reservation on
-              your router for that.
-            </span>
-          </label>
-        </div>
-      </details>
       <div class="row stats">
         <span>Malformed packets: <b id="stat-malformed">0</b></span>
         <span>ArtPoll received: <b id="stat-artpoll">0</b></span>
@@ -68,6 +58,39 @@
       </div>
     </section>
 
+    <!-- ------- Network ------- -->
+    <section id="network-section">
+      <h2>Network</h2>
+      <div class="row">
+        <label class="radio-row">
+          <input type="radio" name="net-mode" id="net-mode-dhcp" value="dhcp" checked>
+          DHCP <span class="muted">(get IP from router — recommended for first boot)</span>
+        </label>
+      </div>
+      <div class="row">
+        <label class="radio-row">
+          <input type="radio" name="net-mode" id="net-mode-static" value="static">
+          Static IP
+        </label>
+      </div>
+      <div id="net-static-fields" class="row" hidden>
+        <label>IP <input id="net-ip" type="text" placeholder="192.168.1.50"></label>
+        <label>/ <input id="net-prefix" type="number" min="1" max="32" value="24" style="width:60px"></label>
+        <label>Gateway <input id="net-gw" type="text" placeholder="192.168.1.1"></label>
+        <label>DNS <input id="net-dns" type="text" placeholder="(blank = same as gateway)"></label>
+      </div>
+      <div class="row">
+        <button id="net-apply-btn" type="button">Apply network</button>
+        <button id="net-reboot-btn" class="subtle" type="button">Reboot Pi</button>
+        <span class="muted hint" id="net-current"></span>
+      </div>
+      <div id="net-banner" class="net-banner" hidden>
+        <b>Network change pending.</b> Click <b>Reboot Pi</b> to apply.
+        After the Pi comes back, this page will redirect to the new IP.
+      </div>
+    </section>
+
+    <!-- ------- Unknown (hidden until populated) ------- -->
     <section id="unknown-section" hidden>
       <h2>Unknown sources <span class="muted">(seen but not allowlisted)</span></h2>
       <table id="unknown-table">
@@ -76,6 +99,7 @@
       </table>
     </section>
 
+    <!-- ------- Sources ------- -->
     <section id="sources-section">
       <h2>Sources</h2>
       <table id="sources-table">
@@ -88,7 +112,6 @@
             <th class="col-mode">Mode</th>
             <th class="col-prio">Priority</th>
             <th class="col-packets">Packets</th>
-            <th class="col-universes">Universes</th>
             <th class="col-actions"></th>
           </tr>
         </thead>
@@ -97,11 +120,12 @@
       <button id="add-source-btn" type="button">Add source</button>
       <p class="muted hint">
         <b>HTP</b> sources merge channel-by-channel (max wins).
-        <b>Priority</b> sources override every HTP source when sending non-zero data;
-        higher priority number wins.
+        <b>Priority</b> sources override every HTP source when sending non-zero
+        data; higher priority number wins.
       </p>
     </section>
 
+    <!-- ------- Outputs ------- -->
     <section id="outputs-section">
       <h2>Outputs</h2>
       <table id="outputs-table">
@@ -110,27 +134,23 @@
             <th class="col-active">On</th>
             <th class="col-ip">IP</th>
             <th class="col-label">Label</th>
+            <th class="col-univ-start">Start</th>
+            <th class="col-univ-end">End</th>
             <th class="col-broadcast">Broadcast</th>
-            <th class="col-packets">Packets sent</th>
+            <th class="col-packets">Packets</th>
             <th class="col-actions"></th>
           </tr>
         </thead>
         <tbody></tbody>
       </table>
       <button id="add-output-btn" type="button">Add output</button>
+      <p class="muted hint">
+        Each output sends universes <b>Start through End</b> (inclusive) to its
+        destination. Different outputs can carry different universe ranges.
+      </p>
     </section>
 
-    <section id="universes-section">
-      <h2>Universes</h2>
-      <div id="universe-chips"></div>
-      <form id="add-universe-form" class="row">
-        <label>Start at <input name="start" type="number" min="0" max="32767" value="1" required></label>
-        <label>End at <input name="end" type="number" min="0" max="32767" value="1" required></label>
-        <button type="submit">Add</button>
-        <span class="muted hint" id="add-universe-preview"></span>
-      </form>
-    </section>
-
+    <!-- ------- Live preview ------- -->
     <section id="preview-section">
       <h2>Live preview</h2>
       <div id="preview-list"></div>

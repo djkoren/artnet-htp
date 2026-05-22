@@ -38,6 +38,10 @@ class OutputSpec:
     label: str = ""
     broadcast: bool = False
     port: int = 6454
+    # Universes this output receives. The sender filters by membership so
+    # different controllers can get different universe subsets. Empty list
+    # means "no universes" — the output is configured but receives nothing.
+    universes: tuple[int, ...] = ()
 
 
 @dataclass(slots=True)

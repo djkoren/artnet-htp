@@ -47,7 +47,21 @@ if [ -f /var/cache/artnet-htp-build/firstboot.sh ]; then
   rm -rf /var/cache/artnet-htp-build
 fi
 
-# 6. Verify the installed package can at least import + report its version.
+# 6. Sudoers entry for the network UI (v0.3.0+). Grants the artnet user
+# passwordless sudo for ONLY nmcli (Network section apply) and /sbin/reboot
+# (apply triggers a reboot). Without this the Pi can't accept network
+# changes via the web UI. /etc/sudoers.d files must be 0440 + chown root
+# or sudo refuses to load them.
+cat > /etc/sudoers.d/artnet-nmcli <<'SUDO'
+# Allow the merger service to apply network config + reboot.
+artnet ALL=(root) NOPASSWD: /usr/bin/nmcli
+artnet ALL=(root) NOPASSWD: /sbin/reboot
+SUDO
+chmod 0440 /etc/sudoers.d/artnet-nmcli
+# Syntax-check the file so a typo here doesn't break sudo on the device.
+visudo -c -f /etc/sudoers.d/artnet-nmcli
+
+# 7. Verify the installed package can at least import + report its version.
 runuser -u "$ARTNET_USER" -- "$INSTALL_DIR/.venv/bin/python" -c \
   "import artnet_htp; print('artnet_htp version:', artnet_htp.__version__)"
 

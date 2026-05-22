@@ -22,7 +22,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 import yaml
 
 from .. import __version__
@@ -38,6 +38,111 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 SYSTEM_VENV_PIP = Path("/opt/artnet-htp/.venv/bin/pip")
 UPDATE_DOWNLOAD_TIMEOUT_S = 120  # tarball is small (~50KB) but allow slow links
 UPDATE_PIP_TIMEOUT_S = 180
+
+
+# --------------------------- network config (v0.3.0+) --------------------------- #
+#
+# nmcli is the only supported backend (Bookworm Lite uses NetworkManager). We
+# don't talk to systemd-networkd or dhcpcd. The image stage installs
+# /etc/sudoers.d/artnet-nmcli giving the `artnet` user passwordless sudo for
+# exactly nmcli + /sbin/reboot. Anything else still needs a real sudoer.
+
+NMCLI = "/usr/bin/nmcli"
+# The connection profile name shipped by Raspberry Pi OS Bookworm. If the
+# user has multiple ethernet profiles this picks the first one matching
+# "Wired connection *". For real-world venue Pis there's only one.
+NMCLI_WIRED_CONN = "Wired connection 1"
+
+
+def _nmcli_available() -> bool:
+    from pathlib import Path as _P
+    return _P(NMCLI).exists()
+
+
+def _read_network_state() -> dict:
+    """Query nmcli for the current ethernet profile state.
+
+    Returns: {"mode": "dhcp"|"static", "ip": "...", "prefix": int,
+              "gateway": "...", "dns": "...", "raw": "...", "available": bool}
+    On a dev machine without nmcli, returns {"available": False}.
+    """
+    import subprocess
+    if not _nmcli_available():
+        return {"available": False, "mode": "dhcp"}
+    try:
+        proc = subprocess.run(
+            [NMCLI, "-t", "-f", "ipv4.method,ipv4.addresses,ipv4.gateway,ipv4.dns",
+             "con", "show", NMCLI_WIRED_CONN],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"available": True, "error": str(e), "mode": "dhcp"}
+    if proc.returncode != 0:
+        return {"available": True, "error": proc.stderr.strip() or "nmcli failed", "mode": "dhcp"}
+
+    parsed = {"mode": "dhcp", "ip": "", "prefix": 24, "gateway": "", "dns": "",
+              "available": True}
+    for line in proc.stdout.splitlines():
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        val = val.strip()
+        if key == "ipv4.method":
+            parsed["mode"] = "static" if val == "manual" else "dhcp"
+        elif key == "ipv4.addresses" and val and val != "--":
+            # "192.168.1.50/24" — split into ip + prefix
+            addr = val.split(",")[0].strip()
+            if "/" in addr:
+                ip, _, p = addr.partition("/")
+                parsed["ip"] = ip
+                try:
+                    parsed["prefix"] = int(p)
+                except ValueError:
+                    pass
+            else:
+                parsed["ip"] = addr
+        elif key == "ipv4.gateway" and val and val != "--":
+            parsed["gateway"] = val
+        elif key == "ipv4.dns" and val and val != "--":
+            parsed["dns"] = val
+    return parsed
+
+
+def _apply_network_state(state: "NetworkState") -> dict:
+    """Apply a new IPv4 config via nmcli. Returns {"ok": bool, ...}.
+
+    Does NOT bring the interface up — the operator reboots after to settle
+    things cleanly. nmcli's "con up" can briefly leave the device in a half-
+    state that confuses pixel controllers; a clean reboot is friendlier.
+    """
+    import subprocess
+    if not _nmcli_available():
+        return {"ok": False, "error": "nmcli not present (dev box?)"}
+
+    cmds = []
+    if state.mode == "dhcp":
+        cmds.append([NMCLI, "con", "mod", NMCLI_WIRED_CONN,
+                     "ipv4.method", "auto",
+                     "ipv4.addresses", "",
+                     "ipv4.gateway", "",
+                     "ipv4.dns", ""])
+    else:
+        addr = f"{state.ip}/{state.prefix}"
+        cmds.append([NMCLI, "con", "mod", NMCLI_WIRED_CONN,
+                     "ipv4.method", "manual",
+                     "ipv4.addresses", addr,
+                     "ipv4.gateway", state.gateway,
+                     "ipv4.dns", state.dns or state.gateway])
+
+    for cmd in cmds:
+        full = ["sudo", "-n", *cmd]
+        try:
+            proc = subprocess.run(full, capture_output=True, text=True, timeout=10, check=False)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return {"ok": False, "error": f"nmcli invocation failed: {e}"}
+        if proc.returncode != 0:
+            return {"ok": False, "error": (proc.stderr or proc.stdout).strip() or "nmcli returned non-zero"}
+    return {"ok": True, "needs_reboot": True}
 
 
 def _running_under_system_venv() -> bool:
@@ -472,48 +577,59 @@ def create_app(controller) -> FastAPI:
         return JSONResponse({"ok": True})
 
     # ---- REST: universe CRUD ----
+    # v0.3.0 dropped the standalone universe list. Universes now live on each
+    # output as a `universes` field; manage them by editing the output and
+    # PUTting the whole config. The /api/universes routes are gone — return
+    # 410 Gone so any old clients see a clear signal rather than a silent
+    # success that drops their data.
     @app.post("/api/universes")
-    async def add_universes(body: UniverseBody) -> JSONResponse:
-        # Normalize single vs list. Reject if neither given.
-        requested: list[int] = []
-        if body.port_addresses is not None:
-            requested.extend(body.port_addresses)
-        if body.port_address is not None:
-            requested.append(body.port_address)
-        if not requested:
-            raise HTTPException(400, "supply `port_address` or `port_addresses`")
-        if len(requested) > 4096:
-            raise HTTPException(400, "too many universes in one request (max 4096)")
-
-        cfg = controller.current_config().model_copy(deep=True)
-        existing = set(cfg.universes)
-        added: list[int] = []
-        skipped: list[int] = []
-        # Preserve input order in `added` (skipped tracks dupes) but dedupe
-        # within the request too.
-        seen_in_request: set[int] = set()
-        for u in requested:
-            if u in seen_in_request:
-                continue
-            seen_in_request.add(u)
-            if u in existing:
-                skipped.append(u)
-            else:
-                existing.add(u)
-                added.append(u)
-        if added:
-            cfg.universes = sorted(existing)
-            controller.apply_config(cfg)
-        return JSONResponse({"ok": True, "added": added, "skipped": skipped})
+    async def gone_post_universes() -> JSONResponse:
+        raise HTTPException(
+            410, "v0.3.0 moved universes onto each output. PUT /api/config "
+            "with output.universes lists instead.",
+        )
 
     @app.delete("/api/universes/{port_address}")
-    async def del_universe(port_address: int) -> JSONResponse:
-        cfg = controller.current_config().model_copy(deep=True)
-        if port_address not in cfg.universes:
-            raise HTTPException(404, f"universe {port_address} not found")
-        cfg.universes = [u for u in cfg.universes if u != port_address]
-        controller.apply_config(cfg)
-        return JSONResponse({"ok": True})
+    async def gone_del_universe(port_address: int) -> JSONResponse:
+        raise HTTPException(
+            410, "v0.3.0 moved universes onto each output. PUT /api/config "
+            "with output.universes lists instead.",
+        )
+
+    # ---- REST: network configuration ----
+    # GET reports current state. POST writes a new state (DHCP or static) via
+    # nmcli, which requires passwordless sudo for the `artnet` user — the
+    # image stage installs /etc/sudoers.d/artnet-nmcli to grant it. Applying
+    # changes does NOT bring the interface up; the operator clicks
+    # POST /api/network/reboot afterward (or power-cycles), and the UI polls
+    # both old + new URLs to redirect when the Pi comes back.
+    @app.get("/api/network")
+    async def get_network() -> JSONResponse:
+        return JSONResponse(await asyncio.to_thread(_read_network_state))
+
+    @app.post("/api/network")
+    async def post_network(req: Request) -> JSONResponse:
+        body = await req.json()
+        try:
+            new_state = NetworkState.model_validate(body)
+        except ValidationError as e:
+            raise HTTPException(400, f"invalid network payload: {e}")
+        result = await asyncio.to_thread(_apply_network_state, new_state)
+        if not result.get("ok"):
+            raise HTTPException(500, result.get("error", "nmcli failed"))
+        return JSONResponse({"ok": True, "applied": new_state.model_dump(), **result})
+
+    @app.post("/api/network/reboot")
+    async def post_network_reboot() -> JSONResponse:
+        if not _nmcli_available():
+            raise HTTPException(503, "no nmcli on this host — reboot from your terminal")
+        async def _reboot_soon() -> None:
+            await asyncio.sleep(0.4)
+            log.info("reboot requested via /api/network/reboot — exec'ing /sbin/reboot")
+            import subprocess
+            subprocess.Popen(["sudo", "-n", "/sbin/reboot"])
+        asyncio.create_task(_reboot_soon())
+        return JSONResponse({"ok": True, "rebooting": True})
 
     # ---- WebSocket: live state ----
     @app.websocket("/ws/state")
@@ -566,11 +682,39 @@ class AllowSourceBody(BaseModel):
 
 
 class UniverseBody(BaseModel):
-    # Accept either a single universe ({"port_address": 9}) or a list
-    # ({"port_addresses": [1,2,3]}). The UI sends the list form post-v0.2.4;
-    # the single form is kept for back-compat / curl convenience.
+    # Kept for the /api/universes 410-Gone handlers — the field shape lets
+    # FastAPI fail-soft on bodies that match the old schema instead of 422'ing.
     port_address: Annotated[int, Field(ge=0, le=0x7FFF)] | None = None
     port_addresses: list[Annotated[int, Field(ge=0, le=0x7FFF)]] | None = None
+
+
+class NetworkState(BaseModel):
+    """Body for POST /api/network.
+
+    `mode: dhcp` → ignore the other fields; nmcli flips ipv4.method to auto.
+    `mode: static` → ip + prefix + gateway required; dns defaults to gateway.
+    """
+    mode: str  # "dhcp" or "static"
+    ip: str = ""
+    prefix: Annotated[int, Field(ge=1, le=32)] = 24
+    gateway: str = ""
+    dns: str = ""
+
+    @field_validator("mode")
+    @classmethod
+    def _mode_valid(cls, v: str) -> str:
+        if v not in ("dhcp", "static"):
+            raise ValueError(f"mode must be 'dhcp' or 'static', got {v!r}")
+        return v
+
+    @model_validator(mode="after")
+    def _static_fields_present(self) -> "NetworkState":
+        if self.mode == "static":
+            if not self.ip:
+                raise ValueError("static mode requires `ip`")
+            if not self.gateway:
+                raise ValueError("static mode requires `gateway`")
+        return self
 
 
 # ---------- WS helpers ----------

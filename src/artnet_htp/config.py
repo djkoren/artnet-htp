@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .protocol import PORT_ADDRESS_MAX
 from .state import OutputSpec, SourceSpec
@@ -57,11 +57,23 @@ class OutputCfg(BaseModel):
     # When false, the sender skips this destination — same effect as deleting,
     # but reversible via the UI On toggle.
     enabled: bool = True
+    # v0.3.0: each output declares which universes it receives. The merger's
+    # working set of universes is the union of every enabled output's list,
+    # so adding/removing outputs implicitly adjusts what gets merged.
+    # An empty list means "no universes" (output is configured but unused).
+    # Legacy configs from <=v0.2.x put their universes at the Config root;
+    # the @model_validator below migrates those down to each output.
+    universes: list[Annotated[int, Field(ge=0, le=0x7FFF)]] = Field(default_factory=list)
 
     @field_validator("ip")
     @classmethod
     def _ip_valid(cls, v: str) -> str:
         return _is_ipv4(v)
+
+    @field_validator("universes")
+    @classmethod
+    def _universes_sorted_unique(cls, v: list[int]) -> list[int]:
+        return sorted(set(v))
 
 
 class WebCfg(BaseModel):
@@ -81,6 +93,10 @@ class NodeCfg(BaseModel):
 
 
 class Config(BaseModel):
+    # v0.3.0: dropped top-level `universes`. Each output declares its own list,
+    # and the runtime universe set is the union of all enabled outputs'
+    # lists. The model_validator below migrates legacy configs that had
+    # `universes` at the top of the YAML.
     model_config = ConfigDict(extra="forbid")
 
     bind_ip: str = "0.0.0.0"
@@ -90,9 +106,31 @@ class Config(BaseModel):
     auto_allow_unknown_sources: bool = False
     sources: list[SourceCfg] = Field(default_factory=list)
     outputs: list[OutputCfg] = Field(default_factory=list)
-    universes: list[Annotated[int, Field(ge=0, le=PORT_ADDRESS_MAX)]] = Field(default_factory=list)
     web: WebCfg = Field(default_factory=WebCfg)
     node: NodeCfg = Field(default_factory=NodeCfg)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_top_level_universes(cls, data):
+        """Back-compat: <=v0.2.x stored universes at the Config root.
+
+        In v0.3.0 each output owns its own universe list. If we see legacy
+        top-level `universes` and the outputs don't have any of their own
+        (empty lists or missing), copy the top-level set into every output.
+        Then drop the top-level field entirely — `extra="forbid"` would
+        otherwise reject the unknown key.
+        """
+        if not isinstance(data, dict):
+            return data
+        top_universes = data.pop("universes", None)
+        if top_universes:
+            outputs = data.get("outputs") or []
+            for o in outputs:
+                if not isinstance(o, dict):
+                    continue
+                if not o.get("universes"):
+                    o["universes"] = list(top_universes)
+        return data
 
     @field_validator("bind_ip")
     @classmethod
@@ -102,17 +140,19 @@ class Config(BaseModel):
             return v
         return _is_ipv4(v)
 
-    @field_validator("universes")
-    @classmethod
-    def _universes_unique(cls, v: list[int]) -> list[int]:
-        seen = set()
-        out = []
-        for u in v:
-            if u in seen:
-                continue
-            seen.add(u)
-            out.append(u)
-        return sorted(out)
+    @property
+    def universes(self) -> list[int]:
+        """Runtime universe set: union of every enabled output's universes.
+
+        Computed on access — not persisted. Used by the merger to allocate
+        merge buffers and by the UI's Live Preview to know which tiles
+        to render.
+        """
+        u: set[int] = set()
+        for o in self.outputs:
+            if o.enabled:
+                u.update(o.universes)
+        return sorted(u)
 
     @field_validator("sources")
     @classmethod
@@ -149,7 +189,13 @@ class Config(BaseModel):
 
     def to_output_specs(self) -> list[OutputSpec]:
         return [
-            OutputSpec(ip=o.ip, label=o.label or o.ip, broadcast=o.broadcast, port=o.port)
+            OutputSpec(
+                ip=o.ip,
+                label=o.label or o.ip,
+                broadcast=o.broadcast,
+                port=o.port,
+                universes=tuple(o.universes),
+            )
             for o in self.outputs
             if o.enabled
         ]

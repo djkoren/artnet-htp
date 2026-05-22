@@ -96,6 +96,16 @@ class SenderThread(threading.Thread):
                 continue  # silent and keepalive off
 
             for out in outputs:
+                # v0.3.0: each output declares which universes it receives.
+                # If its list is non-empty and `u` isn't in it, skip — this
+                # lets one merger fan different universe subsets to different
+                # controllers (Roof gets 1-4, Truss gets 5-8, etc.). Empty
+                # list means "no universes" — output stays configured but
+                # gets nothing until populated.
+                if out.universes and u not in out.universes:
+                    continue
+                if not out.universes:
+                    continue
                 seq = self.state.bump_sequence(out.ip, u)
                 pkt = build_artdmx(port_address=u, data=merged, sequence=seq)
                 sock = self._broadcast_sock if out.broadcast else self._unicast_sock
