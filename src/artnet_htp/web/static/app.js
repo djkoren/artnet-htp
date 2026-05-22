@@ -290,8 +290,13 @@
     if (!snap) return;
     document.getElementById("stat-malformed").textContent = snap.malformed_count;
     document.getElementById("stat-artpoll").textContent = snap.artpoll_count;
-    renderSources(snap.sources);
-    renderOutputs(snap.outputs);
+    // When a row is in edit mode (or "Add new" is open), DON'T tear the
+    // tbody down + rebuild it — the snapshot tick (every ~250ms) would
+    // replace the <input> the operator is typing into and the cursor
+    // would jump out mid-keystroke. v0.2.7 had this bug. Trade-off: live
+    // stats freeze in the table while editing. They resume on Save/Cancel.
+    if (state.editing.source === null) renderSources(snap.sources);
+    if (state.editing.output === null) renderOutputs(snap.outputs);
     renderUnknown(snap.unknown_sources);
   }
 
@@ -850,41 +855,56 @@
     // Live preview of which universes will be added as the operator types.
     const previewEl = document.getElementById("add-universe-preview");
     const startEl = document.querySelector('#add-universe-form [name="start"]');
-    const countEl = document.querySelector('#add-universe-form [name="count"]');
+    const endEl = document.querySelector('#add-universe-form [name="end"]');
+    // Keep End ≥ Start as Start moves up — feels natural when filling in.
+    startEl.addEventListener("input", () => {
+      const s = parseInt(startEl.value, 10);
+      const e = parseInt(endEl.value, 10);
+      if (!Number.isNaN(s) && (Number.isNaN(e) || e < s)) endEl.value = String(s);
+      updateUniversePreview();
+    });
+    endEl.addEventListener("input", updateUniversePreview);
     function updateUniversePreview() {
       const start = parseInt(startEl.value, 10);
-      const count = parseInt(countEl.value, 10);
-      if (Number.isNaN(start) || Number.isNaN(count) || count < 1) {
+      const end = parseInt(endEl.value, 10);
+      if (Number.isNaN(start) || Number.isNaN(end)) {
         previewEl.textContent = "";
         return;
       }
-      const end = start + count - 1;
-      if (end > 32767) {
-        previewEl.textContent = `→ would exceed max universe 32767`;
+      if (end < start) {
+        previewEl.textContent = "→ end must be ≥ start";
         return;
       }
+      if (end > 32767) {
+        previewEl.textContent = "→ end must be ≤ 32767";
+        return;
+      }
+      const count = end - start + 1;
       previewEl.textContent = count === 1
         ? `→ universe ${start}`
-        : `→ universes ${start}–${end}`;
+        : `→ universes ${start}–${end} (${count} total)`;
     }
-    startEl.addEventListener("input", updateUniversePreview);
-    countEl.addEventListener("input", updateUniversePreview);
     updateUniversePreview();
 
     document.getElementById("add-universe-form").onsubmit = async (e) => {
       e.preventDefault();
       const start = parseInt(startEl.value, 10);
-      const count = parseInt(countEl.value, 10);
+      const end = parseInt(endEl.value, 10);
       if (Number.isNaN(start) || start < 0 || start > 32767) {
         toast("Start must be 0–32767", { kind: "err" });
         return;
       }
-      if (Number.isNaN(count) || count < 1 || count > 4096) {
-        toast("Count must be 1–4096", { kind: "err" });
+      if (Number.isNaN(end) || end < start) {
+        toast("End must be ≥ Start", { kind: "err" });
         return;
       }
-      if (start + count - 1 > 32767) {
-        toast(`Start ${start} + count ${count} exceeds max universe 32767`, { kind: "err", durationMs: 4000 });
+      if (end > 32767) {
+        toast("End must be ≤ 32767", { kind: "err" });
+        return;
+      }
+      const count = end - start + 1;
+      if (count > 4096) {
+        toast("Range too large (max 4096)", { kind: "err" });
         return;
       }
       const list = [];
@@ -908,9 +928,11 @@
       } else {
         toast(`Added ${added.length} universe${added.length > 1 ? "s" : ""}`);
       }
-      // Advance Start to the next slot so consecutive clicks keep walking.
-      startEl.value = String(start + count);
-      countEl.value = "1";
+      // Advance Start past the range just added; bump End to match so the
+      // next click adds one more universe by default — operators usually
+      // walk forward universe-by-universe when filling in.
+      startEl.value = String(end + 1);
+      endEl.value = String(end + 1);
       updateUniversePreview();
       await loadConfig();
     };

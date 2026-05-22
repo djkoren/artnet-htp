@@ -104,18 +104,29 @@ code.
 ```bash
 git clone https://github.com/djkoren/artnet-htp
 cd artnet-htp
-python3.11 -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
+python3 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+.venv/bin/pytest
 
-# Run against the example config locally
-cp config.example.yaml config.yaml      # edit IPs/universes
-artnet-htp --config config.yaml
+# Make a dev config that uses port 8080 (port 80 needs root/cap on Linux,
+# sudo on macOS). Everything else stays default — no sources/outputs/universes.
+cat > dev-config.yaml <<'EOF'
+web: { host: 127.0.0.1, port: 8080 }
+bind_ip: 0.0.0.0
+universes: []
+sources: []
+outputs: []
+EOF
+
+.venv/bin/artnet-htp --config dev-config.yaml
 ```
 
-Open `http://localhost:8080` (set `web.port: 8080` in your dev config — port 80
-requires root or the systemd unit's capability grant).
+Open `http://localhost:8080/`.
+
+**Iteration loop**:
+- Edit any `src/artnet_htp/web/static/*.{html,css,js}` → just refresh the browser
+- Python edits → ctrl-c the running process, re-run `.venv/bin/artnet-htp --config dev-config.yaml`
+- Tests: `.venv/bin/pytest` (also runs automatically before tagged image builds via CI)
 
 ### Local end-to-end test (no Pi needed)
 

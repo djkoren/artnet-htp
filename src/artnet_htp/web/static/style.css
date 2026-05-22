@@ -483,8 +483,9 @@ tr.row-disabled td:not(.col-active) { opacity: 0.45; }
 /* ---- Column widths so headers align with rendered rows + editing rows ---- */
 .col-active { width: 50px; text-align: center; }
 .col-status { width: 24px; }
-.col-broadcast { width: 90px; text-align: center; }
-.col-packets { width: 80px; }
+.col-broadcast { width: 130px; text-align: center; white-space: nowrap; }
+.col-broadcast label { white-space: nowrap; }
+.col-packets { width: 110px; white-space: nowrap; }
 .col-actions { width: 160px; }
 .col-mode { width: 110px; }
 .col-prio { width: 80px; }
