@@ -38,6 +38,9 @@ class SourceCfg(BaseModel):
     # number wins exclusively.
     mode: SourceMode = "htp"
     priority: Annotated[int, Field(ge=0, le=999)] = 100  # higher = wins (only meaningful when mode="priority")
+    # When false, packets from this source are dropped before merging — same
+    # effect as deleting the row, but reversible via the UI On toggle.
+    enabled: bool = True
 
     @field_validator("ip")
     @classmethod
@@ -51,6 +54,9 @@ class OutputCfg(BaseModel):
     label: str = ""
     broadcast: bool = False
     port: Annotated[int, Field(ge=1, le=65535)] = 6454
+    # When false, the sender skips this destination — same effect as deleting,
+    # but reversible via the UI On toggle.
+    enabled: bool = True
 
     @field_validator("ip")
     @classmethod
@@ -129,16 +135,23 @@ class Config(BaseModel):
         return v
 
     # ----- conversions -----
+    # Disabled sources/outputs are silently dropped during conversion to specs,
+    # so the merger never sees them. This is simpler than threading an `enabled`
+    # flag through state.py / sender.py — disabling a source is structurally
+    # identical to deleting it for the runtime; we just persist the disabled
+    # row in the YAML config so the UI can flip it back On.
     def to_source_specs(self) -> list[SourceSpec]:
         return [
             SourceSpec(ip=s.ip, label=s.label or s.ip, mode=s.mode, priority=s.priority)
             for s in self.sources
+            if s.enabled
         ]
 
     def to_output_specs(self) -> list[OutputSpec]:
         return [
             OutputSpec(ip=o.ip, label=o.label or o.ip, broadcast=o.broadcast, port=o.port)
             for o in self.outputs
+            if o.enabled
         ]
 
 

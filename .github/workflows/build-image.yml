@@ -187,12 +187,29 @@ jobs:
           EOF
           cat build-info.json
 
+      - name: Package source tarball for in-place updater
+        # Compact, pip-installable source dist. The /api/update/install
+        # endpoint on a running Pi downloads this and pip-installs into the
+        # existing venv, then exits so systemd restarts with the new code.
+        # 10x smaller than the .img.xz so updates don't need a reflash.
+        run: |
+          SRC_TAR="artnet-htp-${{ steps.vars.outputs.tag }}-src.tar.gz"
+          tar --exclude='.git' --exclude='.github' --exclude='image' \
+              --exclude='pi-gen' --exclude='.venv' --exclude='__pycache__' \
+              --exclude='*.pyc' --exclude='.pytest_cache' \
+              --transform "s,^,artnet-htp-${{ steps.vars.outputs.tag }}/," \
+              -czf "$SRC_TAR" src pyproject.toml deploy README.md
+          ls -lh "$SRC_TAR"
+          echo "src_tar=$SRC_TAR" >> "$GITHUB_OUTPUT"
+        id: srctar
+
       - name: Upload as workflow artifact (also for manual_dispatch)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.vars.outputs.image_name }}
           path: |
             ${{ steps.locate.outputs.img_xz }}
+            ${{ steps.srctar.outputs.src_tar }}
             build-info.json
           retention-days: 14
 
@@ -205,6 +222,7 @@ jobs:
           generate_release_notes: true
           files: |
             ${{ steps.locate.outputs.img_xz }}
+            ${{ steps.srctar.outputs.src_tar }}
             build-info.json
           # Tags with a "-" suffix (e.g. v0.0.1-test) are prereleases so they
           # don't show as the "Latest" on the repo page.

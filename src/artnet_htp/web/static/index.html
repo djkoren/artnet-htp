@@ -14,6 +14,7 @@
       <a id="update-badge" class="update-badge" href="#" hidden target="_blank" rel="noopener">
         Update available
       </a>
+      <button id="install-update-btn" class="install-update-btn" type="button" hidden></button>
       <button id="check-updates-btn" class="check-updates-btn" type="button"
               title="Check GitHub for a newer release">Check for updates</button>
       <div id="conn-pill" class="pill disconnected">disconnected</div>
@@ -38,16 +39,12 @@
       <details class="advanced">
         <summary>Advanced</summary>
         <div class="row">
-          <label>Advertised IP (ArtPollReply only)
+          <label>Advertised IP
             <input id="cfg-bind-ip" placeholder="0.0.0.0">
             <span class="muted hint">
-              The IP consoles see when they discover this merger via ArtPoll.
-              <code>0.0.0.0</code> = auto-detect from the Pi's primary interface.
-              <b>This does NOT change the Pi's actual IP</b> — to give the Pi a
-              fixed address, set a DHCP reservation on your router, or run
-              <code>sudo nmcli con mod "Wired connection 1" ipv4.method manual ipv4.addresses &lt;ip&gt;/24 ipv4.gateway &lt;gw&gt;</code>
-              over SSH.
-              The merger always listens on all interfaces regardless of this setting.
+              IP echoed back in ArtPoll discovery. <code>0.0.0.0</code> = auto-detect.
+              Does not change the Pi's actual IP — set a DHCP reservation on
+              your router for that.
             </span>
           </label>
         </div>
@@ -57,20 +54,14 @@
         <span>ArtPoll received: <b id="stat-artpoll">0</b></span>
       </div>
       <div class="row">
-        <button id="export-config" class="subtle" type="button">
-          Export config (YAML)
-        </button>
+        <button id="export-config" class="subtle" type="button">Export config</button>
         <label class="import-label">
           <input id="import-config-file" type="file" accept=".yaml,.yml,application/x-yaml"
                  style="display: none;">
           <span id="import-config-btn" class="button-like" role="button" tabindex="0">
-            Import config…
+            Import config
           </span>
         </label>
-        <span class="muted hint" style="margin-left: auto;">
-          Drop <code>artnet-htp-config.yaml</code> on a fresh SD card's boot
-          partition to auto-load on first boot.
-        </span>
       </div>
       <div id="firstboot-error" class="firstboot-error" hidden>
         <b>First-boot config error:</b> <span id="firstboot-error-text"></span>
@@ -90,37 +81,24 @@
       <table id="sources-table">
         <thead>
           <tr>
-            <th></th>
-            <th>IP</th>
-            <th>Label</th>
-            <th>Mode</th>
-            <th>Priority</th>
-            <th>Packets</th>
-            <th>Universes</th>
-            <th></th>
+            <th class="col-active">On</th>
+            <th class="col-status"></th>
+            <th class="col-ip">IP</th>
+            <th class="col-label">Label</th>
+            <th class="col-mode">Mode</th>
+            <th class="col-prio">Priority</th>
+            <th class="col-packets">Packets</th>
+            <th class="col-universes">Universes</th>
+            <th class="col-actions"></th>
           </tr>
         </thead>
         <tbody></tbody>
       </table>
-      <form id="add-source-form" class="row">
-        <input name="ip" placeholder="192.168.1.10" required>
-        <input name="label" placeholder="Console A (label)">
-        <select name="mode" class="mode-select">
-          <option value="htp" selected>HTP</option>
-          <option value="priority">Priority</option>
-        </select>
-        <input name="priority" type="number" min="0" max="999" value="100"
-               class="prio-input" title="Higher number = wins. Default 100.">
-        <button type="submit">Add source</button>
-      </form>
+      <button id="add-source-btn" type="button">Add source</button>
       <p class="muted hint">
-        <b>Mode</b> sets how each source contributes:
-        <b>HTP</b> sources merge channel-by-channel with each other (max wins).
-        <b>Priority</b> sources <b>override every HTP source</b> when they have any non-zero data
-        (e.g. set FPP to Priority so it takes over the rig when it&rsquo;s active, then falls back
-        to your HTP-merged Madrix when it goes to blackout).
-        Among multiple active Priority sources, the one with the
-        <b>highest Priority number wins</b> (200 beats 100).
+        <b>HTP</b> sources merge channel-by-channel (max wins).
+        <b>Priority</b> sources override every HTP source when sending non-zero data;
+        higher priority number wins.
       </p>
     </section>
 
@@ -129,31 +107,21 @@
       <table id="outputs-table">
         <thead>
           <tr>
-            <th>IP</th>
-            <th>Port</th>
-            <th>Label</th>
-            <th>Broadcast</th>
-            <th>Packets sent</th>
-            <th></th>
+            <th class="col-active">On</th>
+            <th class="col-ip">IP</th>
+            <th class="col-label">Label</th>
+            <th class="col-broadcast">Broadcast</th>
+            <th class="col-packets">Packets sent</th>
+            <th class="col-actions"></th>
           </tr>
         </thead>
         <tbody></tbody>
       </table>
-      <form id="add-output-form" class="row">
-        <input name="ip" placeholder="192.168.1.100" required>
-        <input name="port" type="number" min="1" max="65535" value="6454" class="port-input">
-        <input name="label" placeholder="Controller (label)">
-        <label><input name="broadcast" type="checkbox"> Broadcast</label>
-        <button type="submit">Add output</button>
-      </form>
+      <button id="add-output-btn" type="button">Add output</button>
     </section>
 
     <section id="universes-section">
       <h2>Universes</h2>
-      <p class="muted hint">
-        Add the universes your sources and receivers use. Most rigs use
-        a contiguous run — pick a starting number and how many you need.
-      </p>
       <div id="universe-chips"></div>
       <form id="add-universe-form" class="row">
         <label>Start at <input name="start" type="number" min="0" max="32767" value="1" required></label>

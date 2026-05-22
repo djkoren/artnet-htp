@@ -38,3 +38,4 @@ config.loopback.yaml
 
 # Logs
 *.log
+dev-config.yaml

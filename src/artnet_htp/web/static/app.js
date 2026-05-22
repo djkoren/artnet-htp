@@ -101,9 +101,13 @@
     if (!el) return;
     const v = state.version || {};
     const ver = v.version || "?";
-    el.textContent = `v${ver}`;
-    el.classList.toggle("dev", ver.includes("dev") || ver === "?");
-    const titleBits = [`version ${ver}`];
+    // Strip any leading "v"/"V" so we don't end up rendering "vv0.2.6" when the
+    // baked version string is itself "v0.2.6" (tags are "v"-prefixed, but the
+    // python package version is bare). Always render exactly one "v".
+    const cleanVer = ver.replace(/^v+/i, "");
+    el.textContent = `v${cleanVer}`;
+    el.classList.toggle("dev", cleanVer.includes("dev") || cleanVer === "?");
+    const titleBits = [`version ${cleanVer}`];
     if (v.git_sha) titleBits.push(`git ${String(v.git_sha).slice(0, 7)}`);
     if (v.built_at) titleBits.push(`built ${v.built_at}`);
     if (v.image) titleBits.push(`image ${v.image}`);
@@ -217,6 +221,11 @@
     document.getElementById("cfg-auto-allow").checked = cfg.auto_allow_unknown_sources;
     renderUniverses();
     renderPreviewList();
+    // Source/output tables now key off state.config (persisted, includes
+    // disabled rows) joined with state.snapshot (runtime data). After config
+    // loads we need to repaint them — otherwise a row you just disabled or
+    // added wouldn't reflect until the next WS tick.
+    if (state.snapshot) renderSnapshot();
   }
 
   function renderUniverses() {
@@ -286,11 +295,23 @@
     renderUnknown(snap.unknown_sources);
   }
 
-  function renderSources(sources) {
+  function renderSources(snapSources) {
     const tbody = document.querySelector("#sources-table tbody");
     tbody.innerHTML = "";
-    // Priority sources first (visually), then by priority DESC, then by IP.
-    sources.sort((a, b) => {
+
+    // We iterate the PERSISTED source list (state.config.sources) so disabled
+    // rows still show up — and join in runtime data from the snapshot by IP.
+    // Disabled sources are filtered out of the runtime in to_source_specs(),
+    // so they don't appear in snapSources at all.
+    const cfgSources = (state.config?.sources || []).slice();
+    const snapByIp = new Map();
+    for (const s of snapSources) snapByIp.set(s.ip, s);
+
+    // Priority first, then by priority DESC, then by IP. Disabled rows sink
+    // to the bottom so the operator's attention lands on live sources first.
+    cfgSources.sort((a, b) => {
+      const ea = a.enabled !== false, eb = b.enabled !== false;
+      if (ea !== eb) return ea ? -1 : 1;
       const ma = a.mode === "priority" ? 0 : 1;
       const mb = b.mode === "priority" ? 0 : 1;
       if (ma !== mb) return ma - mb;
@@ -298,25 +319,77 @@
         return (b.priority ?? 100) - (a.priority ?? 100);
       return a.ip.localeCompare(b.ip);
     });
-    for (const s of sources) {
+
+    if (state.editing.source === "__new__") {
       const tr = document.createElement("tr");
-      tr.dataset.ip = s.ip;
-      if (state.editing.source === s.ip) {
-        renderSourceEditing(tr, s);
+      renderSourceEditing(tr, { ip: "", label: "", mode: "htp", priority: 100, enabled: true, _isNew: true });
+      tbody.appendChild(tr);
+    }
+    for (const cfgEntry of cfgSources) {
+      const snapEntry = snapByIp.get(cfgEntry.ip);
+      // Build a unified row object: runtime data when enabled, stub data when
+      // disabled (so the renderer doesn't need to special-case).
+      const row = snapEntry || {
+        ip: cfgEntry.ip,
+        label: cfgEntry.label || cfgEntry.ip,
+        mode: cfgEntry.mode || "htp",
+        priority: cfgEntry.priority ?? 100,
+        alive: false,
+        active: false,
+        packet_count: 0,
+        universes: [],
+      };
+      const tr = document.createElement("tr");
+      tr.dataset.ip = cfgEntry.ip;
+      if (state.editing.source === cfgEntry.ip) {
+        renderSourceEditing(tr, row);
       } else {
-        renderSourceRow(tr, s);
+        renderSourceRow(tr, row);
       }
       tbody.appendChild(tr);
     }
   }
 
+  // Toggle enabled flag on a source/output IP via a config PUT.
+  async function setSourceEnabled(ip, enabled) {
+    const cfg = structuredClone(state.config);
+    const s = cfg.sources.find(x => x.ip === ip);
+    if (!s) return;
+    s.enabled = enabled;
+    try {
+      await putConfig(cfg);
+      toast(`Source ${ip} ${enabled ? "enabled" : "disabled"}`);
+    } catch (e) {
+      toast(`Failed: ${e.message}`, { kind: "err" });
+    }
+  }
+  async function setOutputEnabled(ip, enabled) {
+    const cfg = structuredClone(state.config);
+    const o = cfg.outputs.find(x => x.ip === ip);
+    if (!o) return;
+    o.enabled = enabled;
+    try {
+      await putConfig(cfg);
+      toast(`Output ${ip} ${enabled ? "enabled" : "disabled"}`);
+    } catch (e) {
+      toast(`Failed: ${e.message}`, { kind: "err" });
+    }
+  }
+
   function renderSourceRow(tr, s) {
+    // Look up the persisted `enabled` flag from state.config (snapshot doesn't
+    // carry it). Default true so legacy configs without the field stay on.
+    const cfgEntry = state.config?.sources?.find(x => x.ip === s.ip);
+    const enabled = cfgEntry ? cfgEntry.enabled !== false : true;
+    if (!enabled) tr.classList.add("row-disabled");
+
     const universesDisplay = s.universes
       .map(u => `${u.port_address}${u.active ? "" : (u.alive ? "·" : "*")}`)
       .join(", ");
     const dotClass = `dot${s.alive ? " alive" : ""}${s.active ? " active" : ""}`;
     let badge = '';
-    if (!s.alive) badge = '<span class="badge dead">silent</span>';
+    if (!enabled) badge = '<span class="badge dead">off</span>';
+    else if (!s.alive) badge = '<span class="badge dead">silent</span>';
     else if (!s.active) badge = '<span class="badge idle">blackout</span>';
     else badge = '<span class="badge live">live</span>';
     const mode = s.mode || "htp";
@@ -328,15 +401,17 @@
       : `<span class="muted">${s.priority ?? 100}</span>`;
 
     tr.innerHTML = `
-      <td><span class="${dotClass}"></span></td>
-      <td><code>${escapeHtml(s.ip)}</code> ${badge}</td>
-      <td>${escapeHtml(s.label)}</td>
-      <td>${modeBadge}</td>
-      <td>${prioCell}</td>
-      <td>${s.packet_count}</td>
-      <td class="muted">${universesDisplay || "—"}</td>
-      <td class="row-actions"></td>
+      <td class="col-active"><label class="toggle"><input type="checkbox" ${enabled ? "checked" : ""}><span class="track"></span></label></td>
+      <td class="col-status"><span class="${dotClass}"></span></td>
+      <td class="col-ip"><code>${escapeHtml(s.ip)}</code> ${badge}</td>
+      <td class="col-label">${escapeHtml(s.label)}</td>
+      <td class="col-mode">${modeBadge}</td>
+      <td class="col-prio">${prioCell}</td>
+      <td class="col-packets">${s.packet_count}</td>
+      <td class="col-universes muted">${universesDisplay || "—"}</td>
+      <td class="col-actions row-actions"></td>
     `;
+    tr.querySelector('input[type="checkbox"]').onchange = (e) => setSourceEnabled(s.ip, e.target.checked);
     const actions = tr.lastElementChild;
     const editBtn = document.createElement("button");
     editBtn.className = "subtle";
@@ -357,43 +432,58 @@
   function renderSourceEditing(tr, s) {
     tr.classList.add("editing");
     const mode = s.mode || "htp";
+    const isNew = s._isNew === true;
     tr.innerHTML = `
-      <td></td>
-      <td><input type="text" data-field="ip" value="${escapeAttr(s.ip)}"></td>
-      <td><input type="text" data-field="label" value="${escapeAttr(s.label)}"></td>
-      <td>
+      <td class="col-active"></td>
+      <td class="col-status"></td>
+      <td class="col-ip"><input type="text" data-field="ip" value="${escapeAttr(s.ip)}" placeholder="192.168.1.10"></td>
+      <td class="col-label"><input type="text" data-field="label" value="${escapeAttr(s.label)}" placeholder="Console"></td>
+      <td class="col-mode">
         <select data-field="mode" class="mode-select">
           <option value="htp" ${mode === "htp" ? "selected" : ""}>HTP</option>
           <option value="priority" ${mode === "priority" ? "selected" : ""}>Priority</option>
         </select>
       </td>
-      <td><input type="number" min="0" max="999" data-field="priority" value="${s.priority ?? 100}" class="prio-input-edit"></td>
-      <td></td>
-      <td></td>
-      <td class="row-actions"></td>
+      <td class="col-prio"><input type="number" min="0" max="999" data-field="priority" value="${s.priority ?? 100}" class="prio-input-edit"></td>
+      <td class="col-packets"></td>
+      <td class="col-universes"></td>
+      <td class="col-actions row-actions"></td>
     `;
+    const ipInput = tr.querySelector('[data-field="ip"]');
+    if (isNew) ipInput.focus();
     const actions = tr.lastElementChild;
     const saveBtn = document.createElement("button");
     saveBtn.textContent = "Save";
     saveBtn.onclick = async () => {
-      const newIp = tr.querySelector('[data-field="ip"]').value.trim();
+      const newIp = ipInput.value.trim();
+      if (!newIp) { toast("IP is required", { kind: "err" }); ipInput.focus(); return; }
       const newLabel = tr.querySelector('[data-field="label"]').value;
       const newMode = tr.querySelector('[data-field="mode"]').value;
       const newPri = parseInt(tr.querySelector('[data-field="priority"]').value, 10) || 100;
       const cfg = structuredClone(state.config);
-      const idx = cfg.sources.findIndex(x => x.ip === s.ip);
-      if (idx === -1) return;
-      if (newIp !== s.ip && cfg.sources.some(x => x.ip === newIp)) {
-        alert(`Source ${newIp} already exists.`);
-        return;
+      if (isNew) {
+        if (cfg.sources.some(x => x.ip === newIp)) {
+          toast(`Source ${newIp} already exists`, { kind: "err" });
+          return;
+        }
+        cfg.sources.push({ ip: newIp, label: newLabel, mode: newMode, priority: newPri, enabled: true });
+      } else {
+        const idx = cfg.sources.findIndex(x => x.ip === s.ip);
+        if (idx === -1) return;
+        if (newIp !== s.ip && cfg.sources.some(x => x.ip === newIp)) {
+          toast(`Source ${newIp} already exists`, { kind: "err" });
+          return;
+        }
+        // Preserve enabled flag through edit.
+        cfg.sources[idx] = { ip: newIp, label: newLabel, mode: newMode, priority: newPri, enabled: cfg.sources[idx].enabled !== false };
       }
-      cfg.sources[idx] = { ip: newIp, label: newLabel, mode: newMode, priority: newPri };
       state.editing.source = null;
       try {
         await putConfig(cfg);
+        toast(isNew ? `Source ${newIp} added` : "Source saved");
       } catch (e) {
-        alert(`Save failed: ${e.message}`);
-        state.editing.source = s.ip;
+        toast(`Save failed: ${e.message}`, { kind: "err" });
+        state.editing.source = isNew ? "__new__" : s.ip;
         renderSnapshot();
       }
     };
@@ -405,30 +495,61 @@
     actions.appendChild(cancelBtn);
   }
 
-  function renderOutputs(outputs) {
+  function renderOutputs(snapOutputs) {
     const tbody = document.querySelector("#outputs-table tbody");
     tbody.innerHTML = "";
-    for (const o of outputs) {
+
+    // Same pattern as renderSources: iterate persisted config so disabled rows
+    // remain visible, join in runtime data from the snapshot.
+    const cfgOutputs = (state.config?.outputs || []).slice();
+    const snapByIp = new Map();
+    for (const o of snapOutputs) snapByIp.set(o.ip, o);
+
+    cfgOutputs.sort((a, b) => {
+      const ea = a.enabled !== false, eb = b.enabled !== false;
+      if (ea !== eb) return ea ? -1 : 1;
+      return a.ip.localeCompare(b.ip);
+    });
+
+    if (state.editing.output === "__new__") {
       const tr = document.createElement("tr");
-      tr.dataset.ip = o.ip;
-      if (state.editing.output === o.ip) {
-        renderOutputEditing(tr, o);
+      renderOutputEditing(tr, { ip: "", label: "", broadcast: false, port: 6454, enabled: true, _isNew: true });
+      tbody.appendChild(tr);
+    }
+    for (const cfgEntry of cfgOutputs) {
+      const snapEntry = snapByIp.get(cfgEntry.ip);
+      const row = snapEntry || {
+        ip: cfgEntry.ip,
+        label: cfgEntry.label || cfgEntry.ip,
+        broadcast: !!cfgEntry.broadcast,
+        port: cfgEntry.port ?? 6454,
+        packet_count: 0,
+      };
+      const tr = document.createElement("tr");
+      tr.dataset.ip = cfgEntry.ip;
+      if (state.editing.output === cfgEntry.ip) {
+        renderOutputEditing(tr, row);
       } else {
-        renderOutputRow(tr, o);
+        renderOutputRow(tr, row);
       }
       tbody.appendChild(tr);
     }
   }
 
   function renderOutputRow(tr, o) {
+    const cfgEntry = state.config?.outputs?.find(x => x.ip === o.ip);
+    const enabled = cfgEntry ? cfgEntry.enabled !== false : true;
+    if (!enabled) tr.classList.add("row-disabled");
+
     tr.innerHTML = `
-      <td><code>${escapeHtml(o.ip)}</code></td>
-      <td><code>${o.port ?? 6454}</code></td>
-      <td>${escapeHtml(o.label)}</td>
-      <td>${o.broadcast ? "✓" : ""}</td>
-      <td>${o.packet_count}</td>
-      <td class="row-actions"></td>
+      <td class="col-active"><label class="toggle"><input type="checkbox" ${enabled ? "checked" : ""}><span class="track"></span></label></td>
+      <td class="col-ip"><code>${escapeHtml(o.ip)}</code></td>
+      <td class="col-label">${escapeHtml(o.label)}</td>
+      <td class="col-broadcast">${o.broadcast ? "✓" : ""}</td>
+      <td class="col-packets">${o.packet_count}</td>
+      <td class="col-actions row-actions"></td>
     `;
+    tr.querySelector('input[type="checkbox"]').onchange = (e) => setOutputEnabled(o.ip, e.target.checked);
     const actions = tr.lastElementChild;
     const editBtn = document.createElement("button");
     editBtn.className = "subtle";
@@ -448,36 +569,56 @@
 
   function renderOutputEditing(tr, o) {
     tr.classList.add("editing");
+    const isNew = o._isNew === true;
+    // Port stays in the schema (6454 by default) but isn't surfaced — ArtNet
+    // is always UDP 6454 in the field; exposing the input was just visual noise.
     tr.innerHTML = `
-      <td><input type="text" data-field="ip" value="${escapeAttr(o.ip)}"></td>
-      <td><input type="number" min="1" max="65535" data-field="port" value="${o.port ?? 6454}"></td>
-      <td><input type="text" data-field="label" value="${escapeAttr(o.label)}"></td>
-      <td><input type="checkbox" data-field="broadcast" ${o.broadcast ? "checked" : ""}></td>
-      <td></td>
-      <td class="row-actions"></td>
+      <td class="col-active"></td>
+      <td class="col-ip"><input type="text" data-field="ip" value="${escapeAttr(o.ip)}" placeholder="192.168.1.100"></td>
+      <td class="col-label"><input type="text" data-field="label" value="${escapeAttr(o.label)}" placeholder="Controller"></td>
+      <td class="col-broadcast"><label><input type="checkbox" data-field="broadcast" ${o.broadcast ? "checked" : ""}> Broadcast</label></td>
+      <td class="col-packets"></td>
+      <td class="col-actions row-actions"></td>
     `;
+    const ipInput = tr.querySelector('[data-field="ip"]');
+    if (isNew) ipInput.focus();
     const actions = tr.lastElementChild;
     const saveBtn = document.createElement("button");
     saveBtn.textContent = "Save";
     saveBtn.onclick = async () => {
-      const newIp = tr.querySelector('[data-field="ip"]').value.trim();
-      const newPort = parseInt(tr.querySelector('[data-field="port"]').value, 10) || 6454;
+      const newIp = ipInput.value.trim();
+      if (!newIp) { toast("IP is required", { kind: "err" }); ipInput.focus(); return; }
       const newLabel = tr.querySelector('[data-field="label"]').value;
       const newBroadcast = tr.querySelector('[data-field="broadcast"]').checked;
       const cfg = structuredClone(state.config);
-      const idx = cfg.outputs.findIndex(x => x.ip === o.ip);
-      if (idx === -1) return;
-      if (newIp !== o.ip && cfg.outputs.some(x => x.ip === newIp)) {
-        alert(`Output ${newIp} already exists.`);
-        return;
+      if (isNew) {
+        if (cfg.outputs.some(x => x.ip === newIp)) {
+          toast(`Output ${newIp} already exists`, { kind: "err" });
+          return;
+        }
+        cfg.outputs.push({ ip: newIp, port: 6454, label: newLabel, broadcast: newBroadcast, enabled: true });
+      } else {
+        const idx = cfg.outputs.findIndex(x => x.ip === o.ip);
+        if (idx === -1) return;
+        if (newIp !== o.ip && cfg.outputs.some(x => x.ip === newIp)) {
+          toast(`Output ${newIp} already exists`, { kind: "err" });
+          return;
+        }
+        cfg.outputs[idx] = {
+          ip: newIp,
+          port: cfg.outputs[idx].port ?? 6454,
+          label: newLabel,
+          broadcast: newBroadcast,
+          enabled: cfg.outputs[idx].enabled !== false,
+        };
       }
-      cfg.outputs[idx] = { ip: newIp, port: newPort, label: newLabel, broadcast: newBroadcast };
       state.editing.output = null;
       try {
         await putConfig(cfg);
+        toast(isNew ? `Output ${newIp} added` : "Output saved");
       } catch (e) {
-        alert(`Save failed: ${e.message}`);
-        state.editing.output = o.ip;
+        toast(`Save failed: ${e.message}`, { kind: "err" });
+        state.editing.output = isNew ? "__new__" : o.ip;
         renderSnapshot();
       }
     };
@@ -625,24 +766,31 @@
     document.getElementById("check-updates-btn").onclick = async () => {
       const btn = document.getElementById("check-updates-btn");
       const badge = document.getElementById("update-badge");
+      const installBtn = document.getElementById("install-update-btn");
       const orig = btn.textContent;
       btn.textContent = "Checking…";
       btn.disabled = true;
       badge.hidden = true;
+      installBtn.hidden = true;
       try {
         const r = await fetch("/api/update/status");
         if (!r.ok) throw new Error("status " + r.status);
         const j = await r.json();
         if (j.update_available) {
-          badge.textContent = `Update to ${j.latest}`;
+          badge.textContent = `${j.latest} available`;
           badge.href = j.release_url || "https://github.com/djkoren/artnet-htp/releases";
           badge.hidden = false;
-          btn.textContent = "Up to date check complete";
+          if (j.can_install) {
+            installBtn.textContent = `Install ${j.latest}`;
+            installBtn.dataset.tag = j.latest;
+            installBtn.hidden = false;
+          }
+          btn.textContent = "Check complete";
         } else if (j.error) {
           btn.textContent = "Can't reach GitHub";
           btn.title = j.error;
         } else {
-          btn.textContent = "You're on the latest";
+          btn.textContent = "On latest";
         }
       } catch (e) {
         btn.textContent = "Check failed";
@@ -653,36 +801,50 @@
       }
     };
 
-    document.getElementById("add-source-form").onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      await api("/api/sources", {
-        method: "POST",
-        body: JSON.stringify({
-          ip: fd.get("ip"),
-          label: fd.get("label") || "",
-          mode: fd.get("mode") || "htp",
-          priority: parseInt(fd.get("priority"), 10) || 100,
-        }),
-      });
-      e.target.reset();
-      await loadConfig();
+    document.getElementById("install-update-btn").onclick = async () => {
+      const btn = document.getElementById("install-update-btn");
+      const tag = btn.dataset.tag || "latest";
+      if (!confirm(`Install ${tag}? The merger will download, install, and restart. UI reconnects in ~30s.`)) return;
+      btn.disabled = true;
+      const orig = btn.textContent;
+      btn.textContent = "Installing…";
+      toast(`Installing ${tag}… download + install + restart`, { durationMs: 8000 });
+      try {
+        await api("/api/update/install", { method: "POST" });
+      } catch (e) {
+        toast(`Install failed: ${e.message}`, { kind: "err", durationMs: 10000 });
+        btn.disabled = false;
+        btn.textContent = orig;
+        return;
+      }
+      // The server is exiting; the next /api/state call will fail until
+      // systemd brings us back. Poll until it answers, then reload.
+      const start = Date.now();
+      while (Date.now() - start < 90000) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const r = await fetch("/api/state");
+          if (r.ok) { window.location.reload(); return; }
+        } catch (_e) {}
+      }
+      toast("Service didn't come back within 90s. SSH in and check journalctl.", { kind: "err", durationMs: 15000 });
+      btn.disabled = false;
+      btn.textContent = orig;
     };
 
-    document.getElementById("add-output-form").onsubmit = async (e) => {
-      e.preventDefault();
-      const fd = new FormData(e.target);
-      await api("/api/outputs", {
-        method: "POST",
-        body: JSON.stringify({
-          ip: fd.get("ip"),
-          port: parseInt(fd.get("port"), 10) || 6454,
-          label: fd.get("label") || "",
-          broadcast: !!fd.get("broadcast"),
-        }),
-      });
-      e.target.reset();
-      await loadConfig();
+    // "Add source/output" buttons open a blank editing row inline at the top
+    // of their respective tables. The Save handler in renderSourceEditing /
+    // renderOutputEditing performs the actual POST, with validation +
+    // toast feedback. Cancelling the row removes it.
+    document.getElementById("add-source-btn").onclick = () => {
+      if (state.editing.source) return; // already editing something
+      state.editing.source = "__new__";
+      renderSnapshot();
+    };
+    document.getElementById("add-output-btn").onclick = () => {
+      if (state.editing.output) return;
+      state.editing.output = "__new__";
+      renderSnapshot();
     };
 
     // Live preview of which universes will be added as the operator types.

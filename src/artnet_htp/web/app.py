@@ -32,6 +32,101 @@ log = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
+# Paths used by the in-place updater. Hard-coded to the system install layout
+# (see image/stage-artnet-htp/01-install-merger/01-run-chroot.sh). A dev run
+# from a local venv won't match these and the updater stays disabled.
+SYSTEM_VENV_PIP = Path("/opt/artnet-htp/.venv/bin/pip")
+UPDATE_DOWNLOAD_TIMEOUT_S = 120  # tarball is small (~50KB) but allow slow links
+UPDATE_PIP_TIMEOUT_S = 180
+
+
+def _running_under_system_venv() -> bool:
+    """True when the running Python is /opt/artnet-htp/.venv/bin/python.
+
+    The in-place updater only works in that exact layout — we need pip in the
+    same venv we're running from so the install replaces our own code.
+    """
+    import sys
+    return sys.executable.startswith("/opt/artnet-htp/.venv/") and SYSTEM_VENV_PIP.exists()
+
+
+def _install_tarball(src_tar_url: str, tag: str) -> dict:
+    """Synchronous installer — call from asyncio.to_thread.
+
+    Steps:
+      1. Download src tarball to /tmp/artnet-htp-update-<tag>.tar.gz
+      2. Extract to /tmp/artnet-htp-update-<tag>/
+      3. Run `pip install --upgrade <extracted>` into the system venv
+      4. Return {"ok": True} or {"ok": False, "error": "..."}
+
+    On success the caller schedules os._exit(0) and systemd restarts us with
+    the new code. On failure the running install is unchanged.
+
+    NOTE: pip can overwrite files of the currently-running process on Linux —
+    inodes stay open even when the file is unlinked or replaced. So pip
+    completing successfully and then us exiting cleanly is safe.
+    """
+    import shutil
+    import subprocess
+    import tarfile
+    import tempfile
+    import urllib.request
+
+    log.info("update: downloading %s", src_tar_url)
+    work = Path(tempfile.mkdtemp(prefix=f"artnet-htp-update-{tag}-"))
+    tar_path = work / "src.tar.gz"
+    try:
+        try:
+            with urllib.request.urlopen(src_tar_url, timeout=UPDATE_DOWNLOAD_TIMEOUT_S) as resp:
+                with tar_path.open("wb") as f:
+                    shutil.copyfileobj(resp, f)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"download failed: {e}"}
+
+        log.info("update: extracting %s", tar_path)
+        try:
+            with tarfile.open(tar_path, "r:gz") as tf:
+                # Refuse absolute paths or .. traversal — tarball was built
+                # with --transform "s,^,artnet-htp-<tag>/," so everything
+                # should be rooted under that prefix.
+                safe_prefix = f"artnet-htp-{tag}/"
+                for member in tf.getmembers():
+                    if member.name.startswith("/") or ".." in Path(member.name).parts:
+                        return {"ok": False, "error": f"unsafe tar member: {member.name}"}
+                    if not member.name.startswith(safe_prefix) and member.name != safe_prefix.rstrip("/"):
+                        return {"ok": False, "error": f"tar member outside expected prefix: {member.name}"}
+                tf.extractall(work)
+        except tarfile.TarError as e:
+            return {"ok": False, "error": f"extract failed: {e}"}
+
+        extracted_dir = work / f"artnet-htp-{tag}"
+        if not extracted_dir.is_dir():
+            return {"ok": False, "error": f"expected dir {extracted_dir} not in tarball"}
+
+        log.info("update: pip-installing %s", extracted_dir)
+        try:
+            proc = subprocess.run(
+                [str(SYSTEM_VENV_PIP), "install", "--upgrade", str(extracted_dir)],
+                capture_output=True, text=True, timeout=UPDATE_PIP_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": f"pip install timed out after {UPDATE_PIP_TIMEOUT_S}s"}
+        if proc.returncode != 0:
+            tail = (proc.stderr or proc.stdout or "")[-2000:]
+            log.error("update: pip install failed (rc=%d): %s", proc.returncode, tail)
+            return {"ok": False, "error": f"pip install rc={proc.returncode}: {tail}"}
+
+        log.info("update: install OK, exiting for systemd restart")
+        return {"ok": True}
+    finally:
+        # Cleanup best-effort — don't fail the install over a leftover /tmp
+        # dir, just log.
+        try:
+            shutil.rmtree(work, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            pass
+
 # Optional CI-baked metadata. The pi-gen build stage writes this; on a dev
 # install the file won't exist and we fall back to runtime-only fields.
 BUILD_INFO_PATH = Path("/etc/artnet-htp/build-info.json")
@@ -183,13 +278,87 @@ def create_app(controller) -> FastAPI:
         def _norm(t: str) -> str:
             return t.lstrip("vV").strip()
 
+        # Surface the source tarball asset URL so the in-place updater knows
+        # what to download. Naming convention: artnet-htp-<tag>-src.tar.gz
+        src_tar_url = None
+        for asset in data.get("assets", []):
+            name = asset.get("name", "")
+            if name.startswith("artnet-htp-") and name.endswith("-src.tar.gz"):
+                src_tar_url = asset.get("browser_download_url")
+                break
+
         update_available = bool(latest) and _norm(latest) != _norm(current)
         return JSONResponse({
             "current": current,
             "latest": latest,
             "release_url": release_url,
             "update_available": update_available,
+            "src_tar_url": src_tar_url,
+            "can_install": bool(src_tar_url) and _running_under_system_venv(),
         })
+
+    # ---- REST: in-place install of a newer release ----
+    # Downloads the source tarball from GitHub, extracts to /tmp, pip-installs
+    # into the existing venv at /opt/artnet-htp/.venv, then os._exit so systemd
+    # restarts the service with the new code. If anything fails before the
+    # exit, the running install is untouched and the operator gets an error.
+    #
+    # Restricted to github.com/djkoren/artnet-htp (URL pin in update/status).
+    # Only works when running under /opt/artnet-htp/.venv — a dev run on a
+    # laptop will get 503.
+    @app.post("/api/update/install")
+    async def post_update_install() -> JSONResponse:
+        if not _running_under_system_venv():
+            raise HTTPException(503, "not running under /opt/artnet-htp/.venv — "
+                                "in-place update only works on a system install")
+
+        # Re-fetch latest to get a fresh URL — don't trust client-provided URL.
+        import urllib.error
+        import urllib.request
+
+        def _fetch_latest() -> dict:
+            req = urllib.request.Request(
+                "https://api.github.com/repos/djkoren/artnet-htp/releases/latest",
+                headers={"Accept": "application/vnd.github+json", "User-Agent": "artnet-htp"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read())
+
+        try:
+            data = await asyncio.to_thread(_fetch_latest)
+        except urllib.error.URLError as e:
+            raise HTTPException(502, f"can't reach GitHub: {e.reason}")
+
+        tag = data.get("tag_name", "")
+        if not tag:
+            raise HTTPException(502, "GitHub returned no tag_name")
+
+        src_tar_url = None
+        for asset in data.get("assets", []):
+            name = asset.get("name", "")
+            if name.startswith("artnet-htp-") and name.endswith("-src.tar.gz"):
+                # Sanity-check the host so a compromised redirect can't point
+                # us at a non-Anthropic-...err, non-djkoren artifact.
+                url = asset.get("browser_download_url", "")
+                if url.startswith("https://github.com/djkoren/artnet-htp/"):
+                    src_tar_url = url
+                break
+        if not src_tar_url:
+            raise HTTPException(502, f"release {tag} has no -src.tar.gz asset")
+
+        # Heavy lifting in a worker thread so we don't block the event loop.
+        result = await asyncio.to_thread(_install_tarball, src_tar_url, tag)
+        if not result.get("ok"):
+            raise HTTPException(500, result.get("error", "install failed"))
+
+        # Hand control back to systemd. Tiny delay so the response can flush.
+        async def _exit_soon() -> None:
+            await asyncio.sleep(0.4)
+            log.info("update installed (%s) — exiting for systemd restart", tag)
+            import os
+            os._exit(0)
+        asyncio.create_task(_exit_soon())
+        return JSONResponse({"ok": True, "installed": tag, "restarting": True})
 
     # ---- REST: config ----
     @app.get("/api/config")
