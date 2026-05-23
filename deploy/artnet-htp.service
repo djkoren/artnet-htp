@@ -15,6 +15,13 @@ Type=simple
 User=artnet
 Group=artnet
 WorkingDirectory=/opt/artnet-htp
+# Belt-and-suspenders for port 80 binding: the image stage already runs
+# setcap on .venv/bin/python during build, but if pi-gen's ext4 packaging
+# strips the security.capability xattr (it has occasionally been reported
+# to), the service would crash on bind. Re-apply at every start as root
+# (the `+` prefix runs with the unit's full privileges before dropping
+# to User=artnet). Idempotent: a no-op when the cap is already in place.
+ExecStartPre=+/usr/sbin/setcap cap_net_bind_service=+ep /opt/artnet-htp/.venv/bin/python
 ExecStart=/opt/artnet-htp/.venv/bin/artnet-htp --config /etc/artnet-htp/config.yaml
 Restart=always
 RestartSec=2

@@ -210,8 +210,18 @@ def _install_tarball(src_tar_url: str, tag: str) -> dict:
 
         log.info("update: pip-installing %s", extracted_dir)
         try:
+            # --force-reinstall: ALWAYS overwrite files, even when pip thinks
+            # the installed package and the source dir are at the same version.
+            # Necessary because pyproject.toml version is currently "0.2.0"
+            # for every release — we tag in git but don't bump the package
+            # version per tag. Without --force-reinstall, pip would no-op
+            # and the user'd think the update worked but nothing changed.
+            # --no-deps: skip dependency resolution. We already have FastAPI/
+            # pydantic/etc. in the venv from the original image; rechecking
+            # them against PyPI on every update wastes time + requires net.
             proc = subprocess.run(
-                [str(SYSTEM_VENV_PIP), "install", "--upgrade", str(extracted_dir)],
+                [str(SYSTEM_VENV_PIP), "install",
+                 "--force-reinstall", "--no-deps", str(extracted_dir)],
                 capture_output=True, text=True, timeout=UPDATE_PIP_TIMEOUT_S,
                 check=False,
             )
