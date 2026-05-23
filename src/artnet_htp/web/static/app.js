@@ -628,6 +628,36 @@
   }
 
   // ---- Network section ----
+  // ---- Netmask <-> prefix conversion ----
+  // Convert "255.255.255.0" → 24. Returns null if input isn't a valid netmask
+  // (must be contiguous 1-bits from the left).
+  function netmaskToPrefix(mask) {
+    const parts = String(mask).split(".");
+    if (parts.length !== 4) return null;
+    let binary = "";
+    for (const p of parts) {
+      const n = parseInt(p, 10);
+      if (Number.isNaN(n) || n < 0 || n > 255) return null;
+      binary += n.toString(2).padStart(8, "0");
+    }
+    // Valid netmask = some number of 1s followed by all 0s.
+    const m = binary.match(/^(1*)(0*)$/);
+    if (!m) return null;
+    return m[1].length;
+  }
+  function prefixToNetmask(prefix) {
+    if (prefix < 0 || prefix > 32) return "";
+    const bits = "1".repeat(prefix).padEnd(32, "0");
+    return [0, 8, 16, 24].map(o => parseInt(bits.slice(o, o + 8), 2)).join(".");
+  }
+  // Suggest a gateway based on a static IP: keep the first three octets,
+  // set the last to .1. e.g. 192.168.1.50 → 192.168.1.1. Wrong sometimes
+  // (some networks use .254) but a sensible default operators can override.
+  function defaultGatewayFor(ip) {
+    const m = String(ip).match(/^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/);
+    return m ? `${m[1]}.1` : "";
+  }
+
   function renderNetwork() {
     if (!state.network) return;
     const mode = state.network.mode || "dhcp";
@@ -635,7 +665,7 @@
     document.getElementById("net-mode-static").checked = mode === "static";
     document.getElementById("net-static-fields").hidden = mode !== "static";
     document.getElementById("net-ip").value = state.network.ip || "";
-    document.getElementById("net-prefix").value = state.network.prefix || 24;
+    document.getElementById("net-netmask").value = prefixToNetmask(state.network.prefix || 24);
     document.getElementById("net-gw").value = state.network.gateway || "";
     document.getElementById("net-dns").value = state.network.dns || "";
 
@@ -656,17 +686,44 @@
         document.getElementById("net-static-fields").hidden = !isStatic;
       });
     }
+    // Auto-fill gateway when operator types IP. Only fills if gateway is
+    // currently blank — never overwrites a value they've typed themselves.
+    document.getElementById("net-ip").addEventListener("blur", () => {
+      const gwEl = document.getElementById("net-gw");
+      if (gwEl.value.trim()) return;
+      const guess = defaultGatewayFor(document.getElementById("net-ip").value.trim());
+      if (guess) gwEl.value = guess;
+    });
     document.getElementById("net-apply-btn").addEventListener("click", async () => {
       const isStatic = document.getElementById("net-mode-static").checked;
-      const body = isStatic
-        ? {
-            mode: "static",
-            ip: document.getElementById("net-ip").value.trim(),
-            prefix: parseInt(document.getElementById("net-prefix").value, 10) || 24,
-            gateway: document.getElementById("net-gw").value.trim(),
-            dns: document.getElementById("net-dns").value.trim(),
-          }
-        : { mode: "dhcp" };
+      let body;
+      if (isStatic) {
+        const ip = document.getElementById("net-ip").value.trim();
+        const netmask = document.getElementById("net-netmask").value.trim();
+        const gw = document.getElementById("net-gw").value.trim();
+        const dns = document.getElementById("net-dns").value.trim();
+        // Validate inputs client-side so the operator gets a focused error
+        // before round-tripping to the server.
+        if (!ip) {
+          toast("IP is required for Static mode", { kind: "err" });
+          document.getElementById("net-ip").focus();
+          return;
+        }
+        const prefix = netmaskToPrefix(netmask);
+        if (prefix === null) {
+          toast(`Invalid netmask "${netmask}" — try 255.255.255.0`, { kind: "err", durationMs: 6000 });
+          document.getElementById("net-netmask").focus();
+          return;
+        }
+        if (!gw) {
+          toast("Gateway is required for Static mode", { kind: "err", durationMs: 5000 });
+          document.getElementById("net-gw").focus();
+          return;
+        }
+        body = { mode: "static", ip, prefix, gateway: gw, dns };
+      } else {
+        body = { mode: "dhcp" };
+      }
       try {
         await api("/api/network", { method: "POST", body: JSON.stringify(body) });
       } catch (e) {
