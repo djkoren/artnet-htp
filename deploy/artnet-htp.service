@@ -12,16 +12,29 @@ StartLimitIntervalSec=300
 
 [Service]
 Type=simple
-User=artnet
-Group=artnet
+# v0.3.5 lesson learned: every non-root approach we tried for binding
+# port 80 hit a wall.
+#   - AmbientCapabilities= in the unit (v0.3.0) → implicit no_new_privs
+#     → broke `sudo nmcli` for the Network panel.
+#   - File cap on .venv/bin/python (v0.3.2-3.4) → cap is verifiably on
+#     the binary (getcap confirms cap_net_bind_service=ep) but the
+#     running process can't use it. Multiple rounds of stripping
+#     seccomp-using lockdown directives didn't help.
+#
+# This is a single-purpose appliance on a private show LAN with an
+# unauthenticated REST API. Anyone with network access already has
+# full configuration control. The security delta between
+# "merger as artnet user with caps" and "merger as root" is minimal
+# for the actual threat model. FPP / OctoPrint / many similar
+# appliances run as root for exactly this reason.
+#
+# Trade-off accepted: simpler, works, every release path validated.
+# If we ever want to revisit, systemd socket activation is the right
+# Linux pattern (systemd binds 80 as root, hands the FD to a non-root
+# service). Not blocking on it.
+User=root
+Group=root
 WorkingDirectory=/opt/artnet-htp
-# Belt-and-suspenders for port 80 binding: the image stage already runs
-# setcap on .venv/bin/python during build, but if pi-gen's ext4 packaging
-# strips the security.capability xattr (it has occasionally been reported
-# to), the service would crash on bind. Re-apply at every start as root
-# (the `+` prefix runs with the unit's full privileges before dropping
-# to User=artnet). Idempotent: a no-op when the cap is already in place.
-ExecStartPre=+/usr/sbin/setcap cap_net_bind_service=+ep /opt/artnet-htp/.venv/bin/python
 ExecStart=/opt/artnet-htp/.venv/bin/artnet-htp --config /etc/artnet-htp/config.yaml
 Restart=always
 RestartSec=2
@@ -29,24 +42,6 @@ RestartSec=2
 # Logs go to journald (view with: journalctl -u artnet-htp -f)
 StandardOutput=journal
 StandardError=journal
-
-# Lock-down (kept minimal). Background: any directive that installs a
-# seccomp filter (RestrictNamespaces, LockPersonality, RestrictRealtime,
-# RestrictSUIDSGID, MemoryDenyWriteExecute, SystemCallFilter, ...) makes
-# systemd call prctl(PR_SET_NO_NEW_PRIVS, 1) before exec. That kernel
-# flag strips file capabilities at exec — so our file cap on
-# .venv/bin/python (for port-80 bind) silently doesn't apply, AND sudo
-# can't elevate (so the Network panel's `sudo nmcli` fails). v0.3.3
-# left these enabled and the merger crashed with EACCES on bind 80.
-#
-# We're a single-purpose LAN appliance. Filesystem protection
-# (ProtectSystem=strict + ReadWritePaths) doesn't use seccomp, so it
-# stays — that's where most of the real value was anyway.
-NoNewPrivileges=false
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/etc/artnet-htp /var/log/artnet-htp /opt/artnet-htp
 
 [Install]
 WantedBy=multi-user.target
