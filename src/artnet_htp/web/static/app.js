@@ -240,10 +240,13 @@
     // Stable check: same set + same order → don't tear down canvases.
     const currentKeys = Array.from(state.canvases.keys()).sort((a, b) => a - b).join(",");
     const nextKeys = universes.slice().sort((a, b) => a - b).join(",");
-    if (currentKeys === nextKeys) return;
+    if (currentKeys === nextKeys && universes.length > 0) return;
     clearCanvases();
     container.innerHTML = "";
     if (universes.length === 0) {
+      // Note: this also runs at boot before the first WS snapshot — without it
+      // the section would render empty (no tiles, no message) because v0.3.0
+      // had a bug where the early-return path skipped the empty-state message.
       container.innerHTML = '<span class="muted">Configure an output with a universe range to see live DMX preview.</span>';
       return;
     }
@@ -499,18 +502,28 @@
   }
 
   // Recompute the universes list for an output when Start or End changes.
-  // Passing null for either side preserves the current min/max.
+  // We can't derive the "other" side from the saved universes list because
+  // typing one input may have temporarily emptied it (when end < start), so
+  // we read whichever input wasn't just edited directly from the DOM.
+  // Passing null tells the function "read this side from the DOM."
   function updateOutputUniverses(idx, newStart, newEnd) {
     const o = state.draft.outputs[idx];
-    const cur = Array.isArray(o.universes) ? o.universes : [];
-    const curStart = cur.length ? Math.min(...cur) : 0;
-    const curEnd = cur.length ? Math.max(...cur) : 0;
-    const s = newStart === null ? curStart : Math.max(0, Math.min(32767, newStart || 0));
-    const e = newEnd === null ? curEnd : Math.max(0, Math.min(32767, newEnd || 0));
+    const row = document.querySelector(`#outputs-table tbody tr[data-row-index="${idx}"]`);
+    function fromDom(selector) {
+      const inp = row?.querySelector(selector);
+      const v = parseInt(inp?.value || "0", 10);
+      return Number.isNaN(v) ? 0 : Math.max(0, Math.min(32767, v));
+    }
+    const s = newStart !== null
+      ? Math.max(0, Math.min(32767, newStart || 0))
+      : fromDom(".col-univ-start input");
+    const e = newEnd !== null
+      ? Math.max(0, Math.min(32767, newEnd || 0))
+      : fromDom(".col-univ-end input");
     if (e < s) {
-      // Don't refuse the typing — just let the list stay empty until the
-      // operator fixes End. UI shows the bad values but no universes get
-      // sent until valid.
+      // Let the operator's typing stand visually but emit no universes —
+      // they'll fix it (or the snapshot will eventually show nothing
+      // happening on that output, prompting them).
       o.universes = [];
       return;
     }

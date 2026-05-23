@@ -76,7 +76,9 @@
       </div>
       <div id="net-static-fields" class="row" hidden>
         <label>IP <input id="net-ip" type="text" placeholder="192.168.1.50"></label>
-        <label>/ <input id="net-prefix" type="number" min="1" max="32" value="24" style="width:60px"></label>
+        <label title="Subnet size in CIDR notation. /24 = 255.255.255.0, the default for almost every home/office network. Leave at 24 unless your network admin told you otherwise.">
+          Subnet <span class="muted">/</span> <input id="net-prefix" type="number" min="1" max="32" value="24" style="width:60px">
+        </label>
         <label>Gateway <input id="net-gw" type="text" placeholder="192.168.1.1"></label>
         <label>DNS <input id="net-dns" type="text" placeholder="(blank = same as gateway)"></label>
       </div>

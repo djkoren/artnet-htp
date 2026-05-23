@@ -24,11 +24,24 @@ chown -R "$ARTNET_USER:$ARTNET_USER" "$INSTALL_DIR"
 [ -f "$CONFIG_DIR/build-info.json" ] && chmod 0644 "$CONFIG_DIR/build-info.json"
 
 # 3. Venv + pip install. runuser avoids the sudo dependency.
-runuser -u "$ARTNET_USER" -- python3 -m venv "$INSTALL_DIR/.venv"
+# --copies (not the default --symlinks) gives us a REAL python binary
+# under .venv/bin/python — so the setcap below applies only to OUR
+# python, not the system-wide /usr/bin/python3.11.
+runuser -u "$ARTNET_USER" -- python3 -m venv --copies "$INSTALL_DIR/.venv"
 # Non-editable install: package gets copied into site-packages.
 # The chroot has full network (pi-gen plumbs DNS through) so pip can fetch
 # pydantic-core, etc. arm64 wheels from pypi.
 runuser -u "$ARTNET_USER" -- "$INSTALL_DIR/.venv/bin/pip" install --no-cache-dir "$INSTALL_DIR"
+
+# 3a. Grant the venv's python the right to bind privileged ports (e.g. 80).
+# v0.3.0 used AmbientCapabilities= in the systemd unit, but the kernel
+# implicitly sets PR_SET_NO_NEW_PRIVS whenever ambient caps are granted,
+# which blocks `sudo` from elevating — breaking the Network panel's
+# `sudo nmcli` invocation. File capabilities don't trigger no_new_privs,
+# so this gives us port-80 bind AND working sudo at the same time.
+setcap cap_net_bind_service=+ep "$INSTALL_DIR/.venv/bin/python"
+# Sanity-check the cap stuck (some filesystems strip xattrs silently).
+getcap "$INSTALL_DIR/.venv/bin/python"
 
 # 4. systemd unit.
 install -m 644 "$INSTALL_DIR/deploy/artnet-htp.service" /etc/systemd/system/artnet-htp.service

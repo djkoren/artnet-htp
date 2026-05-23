@@ -411,7 +411,10 @@ details.advanced > summary:hover { color: var(--text); }
 /* ---- Toast stack ---- */
 .toast-stack {
   position: fixed;
-  bottom: 16px;
+  /* Sit just under the fixed-height header. Operator wanted them where
+     their eyes already are when they hit Save changes, not way down at
+     the bottom edge of the viewport. */
+  top: 60px;
   right: 16px;
   display: flex;
   flex-direction: column;

@@ -23,9 +23,13 @@ RestartSec=2
 StandardOutput=journal
 StandardError=journal
 
-# Lock-down (best-effort — we still need network and the binary)
-# NoNewPrivileges has to stay OFF because it strips AmbientCapabilities,
-# which we need to bind port 80 as a non-root user.
+# Lock-down (best-effort — we still need network and the binary).
+# NoNewPrivileges stays off so `sudo nmcli` (used by the Network panel)
+# can elevate. v0.3.0 used AmbientCapabilities for port 80, but ambient
+# caps implicitly trigger PR_SET_NO_NEW_PRIVS at the kernel level — which
+# blocks sudo even with NoNewPrivileges=false in the unit. v0.3.2 moved
+# the port-80 grant to a file capability on .venv/bin/python (set by
+# stage-artnet-htp), which doesn't have that side effect.
 NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
@@ -39,12 +43,6 @@ LockPersonality=true
 MemoryDenyWriteExecute=false  # uvicorn uses some JIT-ish things; keep this off
 RestrictRealtime=true
 RestrictSUIDSGID=true
-
-# UDP 6454 (ArtNet) is unprivileged. Port 80 (default web UI) requires
-# CAP_NET_BIND_SERVICE — the unit grants it ambiently so the `artnet`
-# user can bind it without sudo.
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
