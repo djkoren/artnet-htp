@@ -168,7 +168,13 @@
     state.ws.onmessage = (ev) => {
       if (typeof ev.data === "string") {
         const msg = JSON.parse(ev.data);
-        if (msg.type === "snapshot") {
+        // The server's push loop sends {"type":"status","data":<snapshot>}
+        // (see _push_status_loop in web/app.py). The v0.3.0 UI rewrite
+        // accidentally checked for "snapshot" instead, which silently
+        // dropped every WS message — Live Preview never rendered, packet
+        // counters stayed at "—", status dots never lit. The REST GET
+        // path still populated initial state, so it looked half-working.
+        if (msg.type === "status") {
           state.snapshot = msg.data;
           renderSnapshotOverlay();
         }
