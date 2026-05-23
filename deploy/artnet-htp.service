@@ -30,26 +30,23 @@ RestartSec=2
 StandardOutput=journal
 StandardError=journal
 
-# Lock-down (best-effort — we still need network and the binary).
-# NoNewPrivileges stays off so `sudo nmcli` (used by the Network panel)
-# can elevate. v0.3.0 used AmbientCapabilities for port 80, but ambient
-# caps implicitly trigger PR_SET_NO_NEW_PRIVS at the kernel level — which
-# blocks sudo even with NoNewPrivileges=false in the unit. v0.3.2 moved
-# the port-80 grant to a file capability on .venv/bin/python (set by
-# stage-artnet-htp), which doesn't have that side effect.
+# Lock-down (kept minimal). Background: any directive that installs a
+# seccomp filter (RestrictNamespaces, LockPersonality, RestrictRealtime,
+# RestrictSUIDSGID, MemoryDenyWriteExecute, SystemCallFilter, ...) makes
+# systemd call prctl(PR_SET_NO_NEW_PRIVS, 1) before exec. That kernel
+# flag strips file capabilities at exec — so our file cap on
+# .venv/bin/python (for port-80 bind) silently doesn't apply, AND sudo
+# can't elevate (so the Network panel's `sudo nmcli` fails). v0.3.3
+# left these enabled and the merger crashed with EACCES on bind 80.
+#
+# We're a single-purpose LAN appliance. Filesystem protection
+# (ProtectSystem=strict + ReadWritePaths) doesn't use seccomp, so it
+# stays — that's where most of the real value was anyway.
 NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/etc/artnet-htp /var/log/artnet-htp /opt/artnet-htp
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictNamespaces=true
-LockPersonality=true
-MemoryDenyWriteExecute=false  # uvicorn uses some JIT-ish things; keep this off
-RestrictRealtime=true
-RestrictSUIDSGID=true
 
 [Install]
 WantedBy=multi-user.target
