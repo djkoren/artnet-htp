@@ -17,7 +17,6 @@
       <button id="install-update-btn" class="install-update-btn" type="button" hidden></button>
       <button id="check-updates-btn" class="check-updates-btn" type="button"
               title="Check GitHub for a newer release">Check for updates</button>
-      <span id="dirty-pill" class="dirty-pill" hidden title="Click Save changes in Settings to commit">0 unsaved</span>
       <div id="conn-pill" class="pill disconnected">disconnected</div>
     </div>
   </header>
@@ -44,6 +43,7 @@
       <div class="row">
         <button id="save-all-btn" type="button" disabled>Save changes</button>
         <button id="discard-btn" class="subtle" type="button" disabled>Discard</button>
+        <span id="dirty-pill" class="dirty-pill" hidden title="Pending edits not yet sent to the merger">0 unsaved</span>
         <span class="row-divider"></span>
         <button id="export-config" class="subtle" type="button">Export config</button>
         <label class="import-label">
