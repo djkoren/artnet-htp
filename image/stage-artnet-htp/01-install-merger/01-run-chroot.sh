@@ -33,15 +33,10 @@ runuser -u "$ARTNET_USER" -- python3 -m venv --copies "$INSTALL_DIR/.venv"
 # pydantic-core, etc. arm64 wheels from pypi.
 runuser -u "$ARTNET_USER" -- "$INSTALL_DIR/.venv/bin/pip" install --no-cache-dir "$INSTALL_DIR"
 
-# 3a. Grant the venv's python the right to bind privileged ports (e.g. 80).
-# v0.3.0 used AmbientCapabilities= in the systemd unit, but the kernel
-# implicitly sets PR_SET_NO_NEW_PRIVS whenever ambient caps are granted,
-# which blocks `sudo` from elevating — breaking the Network panel's
-# `sudo nmcli` invocation. File capabilities don't trigger no_new_privs,
-# so this gives us port-80 bind AND working sudo at the same time.
-setcap cap_net_bind_service=+ep "$INSTALL_DIR/.venv/bin/python"
-# Sanity-check the cap stuck (some filesystems strip xattrs silently).
-getcap "$INSTALL_DIR/.venv/bin/python"
+# 3a. Note: setcap on .venv/bin/python happens in 02-run.sh (host-side) —
+# pi-gen drops CAP_SETFCAP from chroot scripts as a security measure, so
+# the host has to apply the cap to the file inside the rootfs after this
+# script finishes. See 02-run.sh for the rationale.
 
 # 4. systemd unit.
 install -m 644 "$INSTALL_DIR/deploy/artnet-htp.service" /etc/systemd/system/artnet-htp.service
