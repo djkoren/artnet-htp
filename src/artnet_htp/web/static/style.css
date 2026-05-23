@@ -121,7 +121,7 @@ header h1 {
 
 main {
   padding: 16px 24px;
-  max-width: 1100px;
+  max-width: 1400px;
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -520,11 +520,12 @@ tr.row-disabled td:not(.col-active) { opacity: 0.45; }
 
 /* ---- Output universes columns ---- */
 .col-univ-start, .col-univ-end {
-  width: 80px;
+  width: 120px;
   text-align: center;
 }
 .col-univ-start input, .col-univ-end input {
-  width: 60px;
+  width: 70px;
+  min-width: 70px;
   text-align: center;
 }
 
@@ -544,4 +545,20 @@ tr.row-disabled td:not(.col-active) { opacity: 0.45; }
   border-radius: 4px;
   font-size: 13px;
   color: var(--text);
+}
+
+/* ---- Header byline + row divider ---- */
+header h1 .byline {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--muted);
+  margin-left: 8px;
+  letter-spacing: 0.02em;
+}
+.row-divider {
+  display: inline-block;
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 4px;
 }

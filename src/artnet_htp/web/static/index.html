@@ -8,7 +8,7 @@
 </head>
 <body>
   <header>
-    <h1>ArtNet HTP Merger</h1>
+    <h1>ArtNet HTP Merger <span class="byline">by DJ Koren</span></h1>
     <div class="header-right">
       <span id="version-badge" class="version-badge" title="version">v…</span>
       <a id="update-badge" class="update-badge" href="#" hidden target="_blank" rel="noopener">
@@ -17,9 +17,7 @@
       <button id="install-update-btn" class="install-update-btn" type="button" hidden></button>
       <button id="check-updates-btn" class="check-updates-btn" type="button"
               title="Check GitHub for a newer release">Check for updates</button>
-      <span id="dirty-pill" class="dirty-pill" hidden>0 unsaved</span>
-      <button id="save-all-btn" type="button" disabled>Save changes</button>
-      <button id="discard-btn" class="subtle" type="button" disabled>Discard</button>
+      <span id="dirty-pill" class="dirty-pill" hidden title="Click Save changes in Settings to commit">0 unsaved</span>
       <div id="conn-pill" class="pill disconnected">disconnected</div>
     </div>
   </header>
@@ -44,6 +42,9 @@
         <span>ArtPoll received: <b id="stat-artpoll">0</b></span>
       </div>
       <div class="row">
+        <button id="save-all-btn" type="button" disabled>Save changes</button>
+        <button id="discard-btn" class="subtle" type="button" disabled>Discard</button>
+        <span class="row-divider"></span>
         <button id="export-config" class="subtle" type="button">Export config</button>
         <label class="import-label">
           <input id="import-config-file" type="file" accept=".yaml,.yml,application/x-yaml"
@@ -64,7 +65,7 @@
       <div class="row">
         <label class="radio-row">
           <input type="radio" name="net-mode" id="net-mode-dhcp" value="dhcp" checked>
-          DHCP <span class="muted">(get IP from router — recommended for first boot)</span>
+          DHCP
         </label>
       </div>
       <div class="row">
@@ -134,8 +135,8 @@
             <th class="col-active">On</th>
             <th class="col-ip">IP</th>
             <th class="col-label">Label</th>
-            <th class="col-univ-start">Start</th>
-            <th class="col-univ-end">End</th>
+            <th class="col-univ-start">Universe start</th>
+            <th class="col-univ-end">Universe end</th>
             <th class="col-broadcast">Broadcast</th>
             <th class="col-packets">Packets</th>
             <th class="col-actions"></th>
