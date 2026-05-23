@@ -232,6 +232,37 @@ def _install_tarball(src_tar_url: str, tag: str) -> dict:
             log.error("update: pip install failed (rc=%d): %s", proc.returncode, tail)
             return {"ok": False, "error": f"pip install rc={proc.returncode}: {tail}"}
 
+        # The version badge in the UI reads from /etc/artnet-htp/build-info.json,
+        # NOT from the python package's __version__. Without this rewrite, an
+        # in-place update from v0.3.7 → v0.3.8 succeeds at the pip level but
+        # the badge stays on v0.3.7 (the value baked into the image at build
+        # time), and operators reasonably conclude "the update didn't work."
+        # Pre-v0.3.9 the in-place updater silently had this bug.
+        try:
+            existing = {}
+            if BUILD_INFO_PATH.is_file():
+                with BUILD_INFO_PATH.open("r", encoding="utf-8") as f:
+                    existing = json.load(f) or {}
+            # Preserve `image` (the .img filename — still accurate; we only
+            # swapped the python package, not the underlying OS image). Stamp
+            # `via` so an operator can tell when something was in-place
+            # updated vs flashed.
+            import time
+            new_info = {
+                **existing,
+                "version": tag,
+                "built_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "via": "in-place-update",
+            }
+            BUILD_INFO_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with BUILD_INFO_PATH.open("w", encoding="utf-8") as f:
+                json.dump(new_info, f, indent=2)
+            log.info("update: build-info.json refreshed to version=%s", tag)
+        except OSError as e:
+            # Non-fatal — the install actually worked, the UI badge just
+            # won't reflect the new version. Log loudly so it's visible.
+            log.warning("update: install OK but couldn't rewrite build-info.json: %s", e)
+
         log.info("update: install OK, exiting for systemd restart")
         return {"ok": True}
     finally:
