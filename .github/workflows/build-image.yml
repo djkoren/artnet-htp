@@ -53,6 +53,28 @@ jobs:
           echo "image_name=artnet-htp-${TAG}" >> "$GITHUB_OUTPUT"
           echo "Build tag: $TAG"
 
+      - name: Set pyproject.toml version from tag
+        # Source-of-truth for the python package version is the git tag.
+        # Sync pyproject.toml here BEFORE the pi-gen sync step copies the
+        # source tree into the image stage — otherwise the image would
+        # ship with whatever was committed at the previous release while
+        # the source tarball had the new version, creating a confusing
+        # mismatch. Strip the leading "v" because tags are "v0.3.8" but
+        # PEP 440 versions are "0.3.8".
+        run: |
+          VERSION="${{ steps.vars.outputs.tag }}"
+          VERSION="${VERSION#v}"
+          # Only bump if the tag is a proper release (PEP 440-ish). Manual
+          # dispatch tags like "manual-12345" should not become the package
+          # version — pip would barf.
+          if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([a-z0-9.+\-]*)?$'; then
+            sed -i "s/^version = .*/version = \"${VERSION}\"/" pyproject.toml
+            echo "pyproject.toml version set to ${VERSION}"
+          else
+            echo "Tag '${VERSION}' isn't a release version — leaving pyproject.toml alone"
+          fi
+          grep '^version' pyproject.toml
+
       - name: Free up runner disk
         run: |
           # pi-gen needs ~15-20GB free during build (rootfs work copy + final
@@ -192,6 +214,8 @@ jobs:
         # endpoint on a running Pi downloads this and pip-installs into the
         # existing venv, then exits so systemd restarts with the new code.
         # 10x smaller than the .img.xz so updates don't need a reflash.
+        # The pyproject.toml version is already set from the tag in the
+        # earlier "Set pyproject.toml version from tag" step.
         run: |
           SRC_TAR="artnet-htp-${{ steps.vars.outputs.tag }}-src.tar.gz"
           tar --exclude='.git' --exclude='.github' --exclude='image' \

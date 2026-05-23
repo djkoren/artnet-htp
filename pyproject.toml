@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "artnet-htp"
-version = "0.2.0"
+version = "0.3.8"
 description = "ArtNet HTP (Highest Takes Priority) merger for Raspberry Pi"
 requires-python = ">=3.11"
 dependencies = [
