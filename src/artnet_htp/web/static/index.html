@@ -93,9 +93,10 @@
       </div>
     </section>
 
-    <!-- ------- Unknown (hidden until populated) ------- -->
-    <section id="unknown-section" hidden>
-      <h2>Unknown sources <span class="muted">(seen but not allowlisted)</span></h2>
+    <!-- ------- Incoming senders (always visible) ------- -->
+    <section id="unknown-section">
+      <h2>Incoming senders <span class="muted">(seen on the wire)</span></h2>
+      <p id="unknown-explainer" class="muted hint"></p>
       <table id="unknown-table">
         <thead><tr><th>IP</th><th>Packets</th><th>Last seen</th><th></th></tr></thead>
         <tbody></tbody>

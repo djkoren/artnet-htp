@@ -601,13 +601,40 @@
 
   function renderUnknown(unknown) {
     const section = document.getElementById("unknown-section");
+    const explainer = document.getElementById("unknown-explainer");
     const tbody = section.querySelector("tbody");
+    const table = section.querySelector("table");
     tbody.innerHTML = "";
-    if (!unknown.length) {
-      section.hidden = true;
+
+    // The section is always visible (v0.3.10). The content depends on
+    // whether Auto-allow is on, and whether anything's actually sending.
+    const autoAllow = !!state.draft?.auto_allow_unknown_sources;
+
+    if (autoAllow) {
+      explainer.innerHTML =
+        '<b>Auto-allow ON.</b> Any new IP that sends ArtNet to the merger is ' +
+        'added to <b>Sources</b> below automatically. Look there to see what ' +
+        'showed up. To approve senders manually instead, uncheck ' +
+        '<i>Auto-allow unknown sources</i> in Settings.';
+      table.hidden = true;
       return;
     }
-    section.hidden = false;
+
+    if (!unknown.length) {
+      explainer.innerHTML =
+        '<b>Watching for senders.</b> Any IP sending ArtNet that isn\'t in ' +
+        'the <b>Sources</b> table below will appear here with a one-click ' +
+        '<b>Add as source</b> button. Nothing seen yet — start your console / ' +
+        'media server and it should show up within a second or two.';
+      table.hidden = true;
+      return;
+    }
+
+    explainer.innerHTML =
+      `<b>${unknown.length} sender${unknown.length > 1 ? "s" : ""} not in your allowlist.</b> ` +
+      'Click <b>Add as source</b> to drop one into the draft, then ' +
+      '<b>Save changes</b> at the top to start merging it.';
+    table.hidden = false;
     for (const u of unknown) {
       const tr = document.createElement("tr");
       tr.innerHTML = `
@@ -992,16 +1019,22 @@
     bindSettingsInputs();
     bindNetworkInputs();
     bindConfigIO();
-    await loadVersion();
+    // Open the WebSocket FIRST — before the awaited config/network loads.
+    // On the Pi, /api/network calls nmcli (up to ~5s timeout). Pre-v0.3.10
+    // the conn pill sat red the whole time those loads were in flight,
+    // making refreshes look broken until the loads completed. Now the
+    // pill goes green within ms; loads happen in the background.
+    connectWS();
+    loadVersion();              // intentionally not awaited
     setInterval(loadVersion, 30_000);
     try {
       await loadConfig();
-      await loadNetwork();
     } catch (e) {
-      console.error("boot failed:", e);
+      console.error("loadConfig failed:", e);
       toast("Failed to load config — check console.", { kind: "err", durationMs: 8000 });
     }
-    connectWS();
+    // loadNetwork last; if it hangs, everything else is already alive.
+    loadNetwork().catch(e => console.error("loadNetwork failed:", e));
   }
   boot();
 })();

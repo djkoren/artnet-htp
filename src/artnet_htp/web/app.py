@@ -684,23 +684,41 @@ def create_app(controller) -> FastAPI:
         status_task = asyncio.create_task(_push_status_loop(ws, controller))
         try:
             while True:
-                # Wait for either client message OR a DMX push tick
+                # Wait for either client message OR a DMX push tick.
                 try:
                     msg = await asyncio.wait_for(ws.receive(), timeout=DMX_PUSH_PERIOD_S)
-                    await _handle_ws_message(msg, watched, last_dmx, last_dmx_sent_at)
                 except asyncio.TimeoutError:
-                    pass
+                    msg = None
                 except WebSocketDisconnect:
                     break
+                except RuntimeError:
+                    # Starlette raises this if we somehow call receive()
+                    # after a disconnect already landed. Treat as a clean
+                    # close so the handler doesn't bubble an ugly ASGI
+                    # exception (which is what showed up in the v0.3.7
+                    # journal and could leave the next refresh's WS in a
+                    # bad state during cleanup).
+                    break
+                if msg is not None:
+                    # Starlette's plain ws.receive() returns a dict — it
+                    # delivers the disconnect message in band rather than
+                    # raising. Detect it explicitly; otherwise the next
+                    # loop iteration's receive() throws RuntimeError.
+                    if msg.get("type") == "websocket.disconnect":
+                        break
+                    try:
+                        await _handle_ws_message(msg, watched, last_dmx, last_dmx_sent_at)
+                    except (WebSocketDisconnect, RuntimeError):
+                        break
 
-                # Push DMX preview frames for watched universes
+                # Push DMX preview frames for watched universes.
                 for u in list(watched):
                     frame = _build_dmx_frame(controller, u, last_dmx, dmx_counter)
                     if frame is None:
                         continue
                     try:
                         await ws.send_bytes(frame)
-                    except RuntimeError:
+                    except (RuntimeError, WebSocketDisconnect):
                         # connection closing
                         break
         except WebSocketDisconnect:
